@@ -1,0 +1,41 @@
+{
+  "productName": "decorator",
+  "version": "0.1.0",
+  "identifier": "com.decorator.app",
+  "build": {
+    "beforeDevCommand": "trunk serve",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "trunk build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Decorator",
+        "width": 800,
+        "height": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/256x256.png",
+      "icons/256x256@2x.png",
+      "icons/512x512.png",
+      "icons/512x512@2x.png"
+    ]
+  }
+}
+
