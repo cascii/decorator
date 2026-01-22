@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use tauri::Emitter;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct FrameFile {
@@ -102,6 +103,14 @@ pub fn run() {
             read_frame_file,
             get_frame_count
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                if let Some(path) = paths.first() {
+                    let path_str = path.to_string_lossy().to_string();
+                    let _ = window.emit("file-drop", path_str);
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

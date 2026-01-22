@@ -4,50 +4,56 @@ use wasm_bindgen::closure::Closure;
 use yew::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
-export function setupDropListener(callback) {
-    const tauri = window.__TAURI__;
+export async function setupDropListener(callback) {
+    // Wait briefly for Tauri to be ready
+    let tauri = window.__TAURI__;
+    if (!tauri) {
+        await new Promise(r => setTimeout(r, 500));
+        tauri = window.__TAURI__;
+    }
     if (!tauri || !tauri.event) {
-        console.warn('Tauri event API not available');
-        return null;
+        console.error('Tauri event API not available');
+        return;
     }
 
-    // Listen for file drop events from Tauri (event name is 'tauri://drop' in Tauri 2.0)
-    return tauri.event.listen('tauri://drop', (event) => {
-        console.log('Drop event received:', event);
-        const paths = event.payload.paths;
-        if (paths && paths.length > 0) {
-            // Get the first dropped path (folder or file)
-            callback(paths[0]);
-        }
+    // Listen for our custom 'file-drop' event emitted from Rust backend
+    await tauri.event.listen('file-drop', (event) => {
+        callback(event.payload);
     });
 }
 
-export function setupDragOverListener(enterCallback, leaveCallback) {
-    const tauri = window.__TAURI__;
+export async function setupDragOverListener(enterCallback, leaveCallback) {
+    let tauri = window.__TAURI__;
+    if (!tauri) {
+        await new Promise(r => setTimeout(r, 500));
+        tauri = window.__TAURI__;
+    }
     if (!tauri || !tauri.event) {
-        return null;
+        return;
     }
 
-    const enterUnlisten = tauri.event.listen('tauri://drag-enter', () => {
+    await tauri.event.listen('tauri://drag-enter', () => {
         enterCallback();
     });
 
-    const leaveUnlisten = tauri.event.listen('tauri://drag-leave', () => {
+    await tauri.event.listen('tauri://drag-leave', () => {
         leaveCallback();
     });
 
-    return { enterUnlisten, leaveUnlisten };
+    await tauri.event.listen('tauri://drop', () => {
+        leaveCallback();
+    });
 }
 "#)]
 extern "C" {
     #[wasm_bindgen(js_name = setupDropListener)]
-    fn setup_drop_listener(callback: &Closure<dyn Fn(String)>) -> JsValue;
+    fn setup_drop_listener(callback: &Closure<dyn Fn(String)>);
 
     #[wasm_bindgen(js_name = setupDragOverListener)]
     fn setup_drag_over_listener(
         enter_callback: &Closure<dyn Fn()>,
         leave_callback: &Closure<dyn Fn()>,
-    ) -> JsValue;
+    );
 }
 
 #[function_component(App)]
