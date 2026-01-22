@@ -1,4 +1,5 @@
 mod app;
+mod ascii_frames_viewer;
 
 use app::App;
 

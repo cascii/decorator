@@ -1,82 +1,128 @@
-use serde::{Deserialize, Serialize};
+use crate::ascii_frames_viewer::AsciiFramesViewer;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen::closure::Closure;
 use yew::prelude::*;
 
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"])]
-    async fn invoke(cmd: &str, args: JsValue) -> JsValue;
+#[wasm_bindgen(inline_js = r#"
+export function setupDropListener(callback) {
+    const tauri = window.__TAURI__;
+    if (!tauri || !tauri.event) {
+        console.warn('Tauri event API not available');
+        return null;
+    }
+
+    // Listen for file drop events from Tauri (event name is 'tauri://drop' in Tauri 2.0)
+    return tauri.event.listen('tauri://drop', (event) => {
+        console.log('Drop event received:', event);
+        const paths = event.payload.paths;
+        if (paths && paths.length > 0) {
+            // Get the first dropped path (folder or file)
+            callback(paths[0]);
+        }
+    });
 }
 
-#[derive(Serialize, Deserialize)]
-struct GreetArgs<'a> {
-    name: &'a str,
+export function setupDragOverListener(enterCallback, leaveCallback) {
+    const tauri = window.__TAURI__;
+    if (!tauri || !tauri.event) {
+        return null;
+    }
+
+    const enterUnlisten = tauri.event.listen('tauri://drag-enter', () => {
+        enterCallback();
+    });
+
+    const leaveUnlisten = tauri.event.listen('tauri://drag-leave', () => {
+        leaveCallback();
+    });
+
+    return { enterUnlisten, leaveUnlisten };
+}
+"#)]
+extern "C" {
+    #[wasm_bindgen(js_name = setupDropListener)]
+    fn setup_drop_listener(callback: &Closure<dyn Fn(String)>) -> JsValue;
+
+    #[wasm_bindgen(js_name = setupDragOverListener)]
+    fn setup_drag_over_listener(
+        enter_callback: &Closure<dyn Fn()>,
+        leave_callback: &Closure<dyn Fn()>,
+    ) -> JsValue;
 }
 
 #[function_component(App)]
 pub fn app() -> Html {
-    let greet_input_ref = use_node_ref();
+    let directory_path = use_state(|| String::new());
+    let is_drag_over = use_state(|| false);
 
-    let name = use_state(|| String::new());
-
-    let greet_msg = use_state(|| String::new());
+    // Setup Tauri drag-drop listener
     {
-        let greet_msg = greet_msg.clone();
-        let name = name.clone();
-        let name2 = name.clone();
-        use_effect_with(
-            name2,
-            move |_| {
-                spawn_local(async move {
-                    if name.is_empty() {
-                        return;
-                    }
+        let directory_path = directory_path.clone();
+        let is_drag_over = is_drag_over.clone();
 
-                    let args = serde_wasm_bindgen::to_value(&GreetArgs { name: &*name }).unwrap();
-                    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-                    let new_msg = invoke("greet", args).await.as_string().unwrap();
-                    greet_msg.set(new_msg);
-                });
+        use_effect_with((), move |_| {
+            let directory_path_clone = directory_path.clone();
+            let is_drag_over_clone = is_drag_over.clone();
+            let is_drag_over_clone2 = is_drag_over.clone();
 
-                || {}
-            },
-        );
+            // Drop handler
+            let drop_closure = Closure::wrap(Box::new(move |path: String| {
+                directory_path_clone.set(path);
+                is_drag_over_clone.set(false);
+            }) as Box<dyn Fn(String)>);
+
+            // Drag enter handler
+            let enter_closure = Closure::wrap(Box::new(move || {
+                is_drag_over_clone2.set(true);
+            }) as Box<dyn Fn()>);
+
+            // Drag leave handler
+            let is_drag_over_leave = is_drag_over.clone();
+            let leave_closure = Closure::wrap(Box::new(move || {
+                is_drag_over_leave.set(false);
+            }) as Box<dyn Fn()>);
+
+            let _drop_unlisten = setup_drop_listener(&drop_closure);
+            let _drag_unlisten = setup_drag_over_listener(&enter_closure, &leave_closure);
+
+            // Keep closures alive
+            drop_closure.forget();
+            enter_closure.forget();
+            leave_closure.forget();
+
+            || ()
+        });
     }
 
-    let greet = {
-        let name = name.clone();
-        let greet_input_ref = greet_input_ref.clone();
-        Callback::from(move |e: SubmitEvent| {
-            e.prevent_default();
-            name.set(
-                greet_input_ref
-                    .cast::<web_sys::HtmlInputElement>()
-                    .unwrap()
-                    .value(),
-            );
+    let on_clear = {
+        let directory_path = directory_path.clone();
+        Callback::from(move |_| {
+            directory_path.set(String::new());
         })
     };
 
+    let drag_over_class = if *is_drag_over { "drag-over" } else { "" };
+
     html! {
         <main class="container">
-            <h1>{"Welcome to Tauri + Yew"}</h1>
-
-            <div class="row">
-                <a href="https://tauri.app" target="_blank">
-                    <img src="public/tauri.svg" class="logo tauri" alt="Tauri logo"/>
-                </a>
-                <a href="https://yew.rs" target="_blank">
-                    <img src="public/yew.png" class="logo yew" alt="Yew logo"/>
-                </a>
+            <div class="drop-zone">
+                if directory_path.is_empty() {
+                    <div class={classes!("drop-zone-hint", drag_over_class)}>
+                        <div class="hint-icon">{"+"}</div>
+                        <p>{"Drag and drop a folder with frames here"}</p>
+                        <p style="font-size: 0.85rem; color: #666;">{"Supports folders with .txt frame files"}</p>
+                    </div>
+                } else {
+                    <div style="position: relative; width: 100%; height: 100%;">
+                        <button class="clear-btn" onclick={on_clear}>{"Clear"}</button>
+                        <AsciiFramesViewer
+                            directory_path={(*directory_path).clone()}
+                            fps={24}
+                            loop_enabled={true}
+                        />
+                    </div>
+                }
             </div>
-            <p>{"Click on the Tauri and Yew logos to learn more."}</p>
-
-            <form class="row" onsubmit={greet}>
-                <input id="greet-input" ref={greet_input_ref} placeholder="Enter a name..." />
-                <button type="submit">{"Greet"}</button>
-            </form>
-            <p>{ &*greet_msg }</p>
         </main>
     }
 }
