@@ -87,6 +87,48 @@ fn read_frame_file(file_path: String) -> Result<String, String> {
     fs::read_to_string(&file_path).map_err(|e| format!("Failed to read frame file: {}", e))
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct ColorData {
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<u8>, // flat RGB array: [r,g,b, r,g,b, ...]
+}
+
+/// Given a .txt frame file path, look for a matching .colors file and read it.
+/// The .colors binary format: 4 bytes width (u32 LE) + 4 bytes height (u32 LE) + width*height*3 bytes RGB.
+#[tauri::command]
+fn read_colors_file(txt_file_path: String) -> Result<Option<ColorData>, String> {
+    let txt_path = PathBuf::from(&txt_file_path);
+    let colors_path = txt_path.with_extension("colors");
+
+    if !colors_path.exists() {
+        return Ok(None);
+    }
+
+    let data = fs::read(&colors_path)
+        .map_err(|e| format!("Failed to read colors file: {}", e))?;
+
+    if data.len() < 8 {
+        return Err("Colors file too small (missing header)".to_string());
+    }
+
+    let width = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    let height = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    let expected_size = 8 + (width as usize * height as usize * 3);
+
+    if data.len() < expected_size {
+        return Err(format!(
+            "Colors file size mismatch: expected {} bytes, got {}",
+            expected_size,
+            data.len()
+        ));
+    }
+
+    let rgb = data[8..expected_size].to_vec();
+
+    Ok(Some(ColorData { width, height, rgb }))
+}
+
 #[tauri::command]
 fn get_frame_count(directory_path: String) -> Result<usize, String> {
     let dir = PathBuf::from(&directory_path);
@@ -101,6 +143,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_frame_files,
             read_frame_file,
+            read_colors_file,
             get_frame_count
         ])
         .on_window_event(|window, event| {

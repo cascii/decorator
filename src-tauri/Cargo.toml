@@ -1,6 +1,6 @@
 [package]
 name = "decorator"
-version = "0.1.0"
+version = "0.2.0"
 description = "lightweight tauri frame for cascii generated art"
 authors = ["you"]
 license = ""
