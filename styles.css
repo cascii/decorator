@@ -239,6 +239,19 @@ html, body {
   font-weight: bold;
 }
 
+.ascii-frames-viewer .ctrl-btn svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+
+.ascii-frames-viewer .play-btn {
+  width: 42px;
+  height: 42px;
+  min-width: 42px;
+  min-height: 42px;
+}
+
 .ascii-frames-viewer .ctrl-btn:hover {
   background: #4a4a4a;
   border-color: #777;
