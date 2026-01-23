@@ -496,17 +496,30 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     };
 
     let font_size_style = format!("font-size: {:.2}px;", *calculated_font_size);
-    let play_icon = if *is_playing { "||" } else { ">" };
+
+    // SVG icons (Lucide-style)
+    let play_svg = Html::from_html_unchecked(AttrValue::from(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"></polygon></svg>"#
+    ));
+    let pause_svg = Html::from_html_unchecked(AttrValue::from(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="14" y="4" width="4" height="16" rx="1"></rect><rect x="6" y="4" width="4" height="16" rx="1"></rect></svg>"#
+    ));
+    let skip_forward_svg = Html::from_html_unchecked(AttrValue::from(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19"></line></svg>"#
+    ));
+    let skip_backward_svg = Html::from_html_unchecked(AttrValue::from(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"></polygon><line x1="5" y1="19" x2="5" y2="5"></line></svg>"#
+    ));
+
+    let play_pause_icon = if *is_playing { pause_svg } else { play_svg };
 
     // Build frame content (colored or plain)
     let frame_html = if frame_count > 0 {
         if let Some(frame) = frames.get(current_frame) {
             if let Some(ref colors) = frame.colors {
-                // Render with colors using raw HTML
                 let colored = build_colored_html(&frame.content, colors);
                 Html::from_html_unchecked(AttrValue::from(colored))
             } else {
-                // Plain text
                 Html::from(frame.content.clone())
             }
         } else {
@@ -556,13 +569,13 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                         disabled={frame_count == 0}
                     />
                     <button
-                        class="ctrl-btn"
+                        class="ctrl-btn play-btn"
                         type="button"
                         onclick={on_toggle_play}
                         disabled={frame_count == 0}
-                        title="Play/Pause"
+                        title={if *is_playing { "Pause" } else { "Play" }}
                     >
-                        {play_icon}
+                        {play_pause_icon}
                     </button>
                 </div>
 
@@ -583,7 +596,7 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                         disabled={frame_count == 0}
                         title="Step backward"
                     >
-                        {"<"}
+                        {skip_backward_svg}
                     </button>
                     <button
                         class="ctrl-btn"
@@ -592,7 +605,7 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                         disabled={frame_count == 0}
                         title="Step forward"
                     >
-                        {">"}
+                        {skip_forward_svg}
                     </button>
                 </div>
             </div>
