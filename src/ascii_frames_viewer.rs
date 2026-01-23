@@ -48,6 +48,20 @@ struct FrameFile {
     index: u32,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct ColorData {
+    width: u32,
+    height: u32,
+    rgb: Vec<u8>,
+}
+
+/// A loaded frame: text content + optional color data
+#[derive(Clone, Debug)]
+struct Frame {
+    content: String,
+    colors: Option<ColorData>,
+}
+
 #[derive(Properties, PartialEq, Clone)]
 pub struct AsciiFramesViewerProps {
     pub directory_path: String,
@@ -57,15 +71,66 @@ pub struct AsciiFramesViewerProps {
     pub loop_enabled: bool,
 }
 
+/// Build an HTML string with colored spans for each character
+fn build_colored_html(content: &str, colors: &ColorData) -> String {
+    let mut html = String::with_capacity(content.len() * 40);
+    let mut row: u32 = 0;
+    let mut col: u32 = 0;
+
+    for ch in content.chars() {
+        if ch == '\n' {
+            html.push('\n');
+            row += 1;
+            col = 0;
+            continue;
+        }
+
+        if row < colors.height && col < colors.width {
+            let idx = ((row * colors.width + col) * 3) as usize;
+            if idx + 2 < colors.rgb.len() {
+                let r = colors.rgb[idx];
+                let g = colors.rgb[idx + 1];
+                let b = colors.rgb[idx + 2];
+                // Skip styling for spaces or very dark colors (both r,g,b < 5)
+                if ch == ' ' || (r < 5 && g < 5 && b < 5) {
+                    html.push(ch);
+                } else {
+                    html.push_str(&format!(
+                        "<span style=\"color:rgb({},{},{})\">",
+                        r, g, b
+                    ));
+                    // Escape HTML entities
+                    match ch {
+                        '<' => html.push_str("&lt;"),
+                        '>' => html.push_str("&gt;"),
+                        '&' => html.push_str("&amp;"),
+                        '"' => html.push_str("&quot;"),
+                        _ => html.push(ch),
+                    }
+                    html.push_str("</span>");
+                }
+            } else {
+                html.push(ch);
+            }
+        } else {
+            html.push(ch);
+        }
+
+        col += 1;
+    }
+
+    html
+}
+
 #[function_component(AsciiFramesViewer)]
 pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
-    let frames = use_state(|| Vec::<String>::new());
+    let frames = use_state(|| Vec::<Frame>::new());
     let current_index = use_state(|| 0usize);
     let current_index_ref = use_mut_ref(|| 0usize);
     let is_playing = use_state(|| false);
     let is_loading = use_state(|| true);
     let error_message = use_state(|| None::<String>);
-    let loading_progress = use_state(|| (0, 0)); // (loaded, total)
+    let loading_progress = use_state(|| (0, 0));
     let interval_handle: Rc<RefCell<Option<Interval>>> = use_mut_ref(|| None);
 
     // Auto-sizing state
@@ -104,78 +169,89 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
             current_index.set(0);
             is_playing.set(false);
 
-            // Cancel any running animation interval
             interval_handle.borrow_mut().take();
 
             if directory_path.is_empty() {
                 is_loading.set(false);
             } else {
                 wasm_bindgen_futures::spawn_local(async move {
-                // Get total frame count first
-                let count_args =
-                    serde_wasm_bindgen::to_value(&json!({ "directoryPath": directory_path }))
-                        .unwrap();
-                let total_frames = match tauri_invoke("get_frame_count", count_args).await {
-                    result => serde_wasm_bindgen::from_value::<usize>(result).unwrap_or(0),
-                };
+                    // Get total frame count
+                    let count_args =
+                        serde_wasm_bindgen::to_value(&json!({ "directoryPath": directory_path }))
+                            .unwrap();
+                    let total_frames = match tauri_invoke("get_frame_count", count_args).await {
+                        result => serde_wasm_bindgen::from_value::<usize>(result).unwrap_or(0),
+                    };
 
-                // Get list of frame files
-                let args =
-                    serde_wasm_bindgen::to_value(&json!({ "directoryPath": directory_path }))
-                        .unwrap();
-                match tauri_invoke("get_frame_files", args).await {
-                    result => {
-                        match serde_wasm_bindgen::from_value::<Vec<FrameFile>>(result) {
-                            Ok(frame_files) => {
-                                let total_count = if total_frames > 0 {
-                                    total_frames
-                                } else {
-                                    frame_files.len()
-                                };
-                                loading_progress.set((0, total_count));
+                    // Get list of frame files
+                    let args =
+                        serde_wasm_bindgen::to_value(&json!({ "directoryPath": directory_path }))
+                            .unwrap();
+                    match tauri_invoke("get_frame_files", args).await {
+                        result => {
+                            match serde_wasm_bindgen::from_value::<Vec<FrameFile>>(result) {
+                                Ok(frame_files) => {
+                                    let total_count = if total_frames > 0 {
+                                        total_frames
+                                    } else {
+                                        frame_files.len()
+                                    };
+                                    loading_progress.set((0, total_count));
 
-                                // Load all frame contents
-                                let mut loaded_frames = Vec::new();
-                                for (i, frame_file) in frame_files.into_iter().enumerate() {
-                                    let args = serde_wasm_bindgen::to_value(
-                                        &json!({ "filePath": frame_file.path }),
-                                    )
-                                    .unwrap();
-                                    match tauri_invoke("read_frame_file", args).await {
-                                        result => {
-                                            match serde_wasm_bindgen::from_value::<String>(result) {
-                                                Ok(content) => {
-                                                    loaded_frames.push(content);
-                                                    loading_progress.set((i + 1, total_count));
-                                                }
-                                                Err(e) => {
-                                                    error_message.set(Some(format!(
-                                                        "Failed to read frame {}: {:?}",
-                                                        frame_file.name, e
-                                                    )));
-                                                    break;
+                                    let mut loaded_frames = Vec::new();
+                                    for (i, frame_file) in frame_files.into_iter().enumerate() {
+                                        // Load frame text
+                                        let args = serde_wasm_bindgen::to_value(
+                                            &json!({ "filePath": frame_file.path }),
+                                        )
+                                        .unwrap();
+                                        let content = match tauri_invoke("read_frame_file", args).await {
+                                            result => {
+                                                match serde_wasm_bindgen::from_value::<String>(result) {
+                                                    Ok(c) => c,
+                                                    Err(e) => {
+                                                        error_message.set(Some(format!(
+                                                            "Failed to read frame {}: {:?}",
+                                                            frame_file.name, e
+                                                        )));
+                                                        break;
+                                                    }
                                                 }
                                             }
-                                        }
-                                    }
-                                }
+                                        };
 
-                                if loaded_frames.is_empty() {
-                                    error_message
-                                        .set(Some("No frames found in directory".to_string()));
-                                } else {
-                                    frames.set(loaded_frames);
+                                        // Try to load matching .colors file
+                                        let colors_args = serde_wasm_bindgen::to_value(
+                                            &json!({ "txtFilePath": frame_file.path }),
+                                        )
+                                        .unwrap();
+                                        let colors = match tauri_invoke("read_colors_file", colors_args).await {
+                                            result => {
+                                                serde_wasm_bindgen::from_value::<Option<ColorData>>(result)
+                                                    .unwrap_or(None)
+                                            }
+                                        };
+
+                                        loaded_frames.push(Frame { content, colors });
+                                        loading_progress.set((i + 1, total_count));
+                                    }
+
+                                    if loaded_frames.is_empty() {
+                                        error_message
+                                            .set(Some("No frames found in directory".to_string()));
+                                    } else {
+                                        frames.set(loaded_frames);
+                                    }
+                                    is_loading.set(false);
                                 }
-                                is_loading.set(false);
-                            }
-                            Err(e) => {
-                                error_message
-                                    .set(Some(format!("Failed to list frames: {:?}", e)));
-                                is_loading.set(false);
+                                Err(e) => {
+                                    error_message
+                                        .set(Some(format!("Failed to list frames: {:?}", e)));
+                                    is_loading.set(false);
+                                }
                             }
                         }
                     }
-                }
                 });
             }
 
@@ -282,7 +358,7 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                 }
 
                 if let Some(first_frame) = frames.first() {
-                    let lines: Vec<&str> = first_frame.lines().collect();
+                    let lines: Vec<&str> = first_frame.content.lines().collect();
                     let row_count = lines.len();
                     let col_count = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
 
@@ -422,6 +498,30 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     let font_size_style = format!("font-size: {:.2}px;", *calculated_font_size);
     let play_icon = if *is_playing { "||" } else { ">" };
 
+    // Build frame content (colored or plain)
+    let frame_html = if frame_count > 0 {
+        if let Some(frame) = frames.get(current_frame) {
+            if let Some(ref colors) = frame.colors {
+                // Render with colors using raw HTML
+                let colored = build_colored_html(&frame.content, colors);
+                Html::from_html_unchecked(AttrValue::from(colored))
+            } else {
+                // Plain text
+                Html::from(frame.content.clone())
+            }
+        } else {
+            Html::from("")
+        }
+    } else {
+        Html::from("")
+    };
+
+    let has_colors = frame_count > 0
+        && frames
+            .get(current_frame)
+            .map(|f| f.colors.is_some())
+            .unwrap_or(false);
+
     html! {
         <div class="ascii-frames-viewer">
             <div class="frames-display" ref={container_ref}>
@@ -433,12 +533,12 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                     <div class="no-frames">{"No frames available"}</div>
                 } else {
                     <pre class="ascii-frame-content" style={font_size_style}>{
-                        frames.get(current_frame).cloned().unwrap_or_default()
+                        frame_html
                     }</pre>
                     <div class="frame-info-overlay">
                         <span class="info-left">{format!("FPS: {}", *current_fps)}</span>
                         <span class="info-center">{format!("{}/{}", current_frame + 1, frame_count)}</span>
-                        <span class="info-right"></span>
+                        <span class="info-right">{if has_colors { "Color" } else { "" }}</span>
                     </div>
                 }
             </div>

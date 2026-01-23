@@ -1,6 +1,6 @@
 {
   "productName": "decorator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.decorator.app",
   "build": {
     "beforeDevCommand": "trunk serve",
