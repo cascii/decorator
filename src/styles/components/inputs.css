@@ -1,0 +1,53 @@
+/* Input and form element styles */
+
+/* Progress slider */
+.ascii-frames-viewer .progress {
+  flex: 1;
+  width: 100%;
+  height: 16px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--color-surface-elevated);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  margin: 0;
+  padding: 0;
+}
+
+.ascii-frames-viewer .progress::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-text);
+  cursor: grab;
+}
+
+.ascii-frames-viewer .progress::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-text);
+  border: none;
+  cursor: grab;
+}
+
+/* FPS input */
+.ascii-frames-viewer .fps-input {
+  width: 70px;
+  height: 38px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-light);
+  font-size: 0.875rem;
+  font-family: var(--font-mono);
+  text-align: center;
+}
+
+.ascii-frames-viewer .fps-input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
