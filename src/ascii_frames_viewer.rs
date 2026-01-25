@@ -49,17 +49,18 @@ struct FrameFile {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-struct ColorData {
+struct CFrameData {
     width: u32,
     height: u32,
+    chars: Vec<u8>,
     rgb: Vec<u8>,
 }
 
-/// A loaded frame: text content + optional color data
+/// A loaded frame: text content + optional cframe data for canvas rendering
 #[derive(Clone, Debug)]
 struct Frame {
     content: String,
-    colors: Option<ColorData>,
+    cframe: Option<CFrameData>,
 }
 
 #[derive(Properties, PartialEq, Clone)]
@@ -69,57 +70,6 @@ pub struct AsciiFramesViewerProps {
     pub fps: u32,
     #[prop_or(true)]
     pub loop_enabled: bool,
-}
-
-/// Build an HTML string with colored spans for each character
-fn build_colored_html(content: &str, colors: &ColorData) -> String {
-    let mut html = String::with_capacity(content.len() * 40);
-    let mut row: u32 = 0;
-    let mut col: u32 = 0;
-
-    for ch in content.chars() {
-        if ch == '\n' {
-            html.push('\n');
-            row += 1;
-            col = 0;
-            continue;
-        }
-
-        if row < colors.height && col < colors.width {
-            let idx = ((row * colors.width + col) * 3) as usize;
-            if idx + 2 < colors.rgb.len() {
-                let r = colors.rgb[idx];
-                let g = colors.rgb[idx + 1];
-                let b = colors.rgb[idx + 2];
-                // Skip styling for spaces or very dark colors (both r,g,b < 5)
-                if ch == ' ' || (r < 5 && g < 5 && b < 5) {
-                    html.push(ch);
-                } else {
-                    html.push_str(&format!(
-                        "<span style=\"color:rgb({},{},{})\">",
-                        r, g, b
-                    ));
-                    // Escape HTML entities
-                    match ch {
-                        '<' => html.push_str("&lt;"),
-                        '>' => html.push_str("&gt;"),
-                        '&' => html.push_str("&amp;"),
-                        '"' => html.push_str("&quot;"),
-                        _ => html.push(ch),
-                    }
-                    html.push_str("</span>");
-                }
-            } else {
-                html.push(ch);
-            }
-        } else {
-            html.push(ch);
-        }
-
-        col += 1;
-    }
-
-    html
 }
 
 #[function_component(AsciiFramesViewer)]
@@ -133,8 +83,13 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     let loading_progress = use_state(|| (0, 0));
     let interval_handle: Rc<RefCell<Option<Interval>>> = use_mut_ref(|| None);
 
+    // Color display toggle
+    let color_enabled = use_state(|| false);
+
     // Auto-sizing state
     let container_ref = use_node_ref();
+    let content_ref = use_node_ref();
+    let canvas_ref = use_node_ref();
     let calculated_font_size = use_state(|| 10.0f64);
     let container_size = use_state(|| (0.0f64, 0.0f64));
 
@@ -220,19 +175,19 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                                             }
                                         };
 
-                                        // Try to load matching .colors file
-                                        let colors_args = serde_wasm_bindgen::to_value(
+                                        // Try to load matching .cframe file for canvas rendering
+                                        let cframe_args = serde_wasm_bindgen::to_value(
                                             &json!({ "txtFilePath": frame_file.path }),
                                         )
                                         .unwrap();
-                                        let colors = match tauri_invoke("read_colors_file", colors_args).await {
+                                        let cframe = match tauri_invoke("read_cframe_file", cframe_args).await {
                                             result => {
-                                                serde_wasm_bindgen::from_value::<Option<ColorData>>(result)
+                                                serde_wasm_bindgen::from_value::<Option<CFrameData>>(result)
                                                     .unwrap_or(None)
                                             }
                                         };
 
-                                        loaded_frames.push(Frame { content, colors });
+                                        loaded_frames.push(Frame { content, cframe });
                                         loading_progress.set((i + 1, total_count));
                                     }
 
@@ -390,6 +345,104 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
         );
     }
 
+    // Update frame content: canvas for colored mode, text for plain mode
+    {
+        let content_ref = content_ref.clone();
+        let canvas_ref = canvas_ref.clone();
+        let frames = frames.clone();
+        let color_enabled = *color_enabled;
+        let current_frame_idx = (*current_index).min(frames.len().saturating_sub(1));
+        let font_size = *calculated_font_size;
+
+        use_effect_with((current_frame_idx, color_enabled, frames.len(), (font_size * 100.0) as i32), move |_| {
+            if let Some(frame) = frames.get(current_frame_idx) {
+                if color_enabled {
+                    if let Some(ref cframe) = frame.cframe {
+                        // Draw on canvas
+                        if let Some(canvas) = canvas_ref.cast::<web_sys::HtmlCanvasElement>() {
+                            let char_width = font_size * 0.6;
+                            let line_height = font_size * 1.11;
+                            let canvas_w = (cframe.width as f64 * char_width).ceil() as u32;
+                            let canvas_h = (cframe.height as f64 * line_height).ceil() as u32;
+                            canvas.set_width(canvas_w);
+                            canvas.set_height(canvas_h);
+
+                            if let Ok(Some(ctx_obj)) = canvas.get_context("2d") {
+                                if let Ok(ctx) = ctx_obj.dyn_into::<web_sys::CanvasRenderingContext2d>() {
+                                    ctx.clear_rect(0.0, 0.0, canvas_w as f64, canvas_h as f64);
+                                    let font_str = format!("{:.2}px monospace", font_size);
+                                    ctx.set_font(&font_str);
+                                    ctx.set_text_baseline("top");
+
+                                    let width = cframe.width as usize;
+                                    let height = cframe.height as usize;
+
+                                    for row in 0..height {
+                                        let mut col = 0;
+                                        while col < width {
+                                            let idx = row * width + col;
+                                            let ch = cframe.chars[idx];
+                                            let r = cframe.rgb[idx * 3];
+                                            let g = cframe.rgb[idx * 3 + 1];
+                                            let b = cframe.rgb[idx * 3 + 2];
+
+                                            // Skip spaces and very dark chars
+                                            if ch == b' ' || (r < 5 && g < 5 && b < 5) {
+                                                col += 1;
+                                                continue;
+                                            }
+
+                                            // Batch consecutive chars with same color
+                                            let mut batch = String::new();
+                                            batch.push(ch as char);
+                                            let start_col = col;
+                                            col += 1;
+
+                                            while col < width {
+                                                let next_idx = row * width + col;
+                                                let next_ch = cframe.chars[next_idx];
+                                                let nr = cframe.rgb[next_idx * 3];
+                                                let ng = cframe.rgb[next_idx * 3 + 1];
+                                                let nb = cframe.rgb[next_idx * 3 + 2];
+
+                                                if nr == r && ng == g && nb == b
+                                                    && next_ch != b' '
+                                                    && !(nr < 5 && ng < 5 && nb < 5)
+                                                {
+                                                    batch.push(next_ch as char);
+                                                    col += 1;
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+
+                                            let color_str = format!("rgb({},{},{})", r, g, b);
+                                            ctx.set_fill_style_str(&color_str);
+                                            let x = start_col as f64 * char_width;
+                                            let y = row as f64 * line_height;
+                                            let _ = ctx.fill_text(&batch, x, y);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // No cframe data, fall back to plain text
+                        if let Some(element) = content_ref.cast::<web_sys::HtmlElement>() {
+                            element.set_text_content(Some(&frame.content));
+                        }
+                    }
+                } else {
+                    // Plain text mode
+                    if let Some(element) = content_ref.cast::<web_sys::HtmlElement>() {
+                        element.set_text_content(Some(&frame.content));
+                    }
+                }
+            }
+            || ()
+        });
+    }
+
     let on_toggle_play = {
         let is_playing = is_playing.clone();
         Callback::from(move |_| {
@@ -511,28 +564,27 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"></polygon><line x1="5" y1="19" x2="5" y2="5"></line></svg>"#
     ));
 
-    let play_pause_icon = if *is_playing { pause_svg } else { play_svg };
+    let color_svg = Html::from_html_unchecked(AttrValue::from(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08"></path><path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02z"></path></svg>"#
+    ));
 
-    // Build frame content (colored or plain)
-    let frame_html = if frame_count > 0 {
-        if let Some(frame) = frames.get(current_frame) {
-            if let Some(ref colors) = frame.colors {
-                let colored = build_colored_html(&frame.content, colors);
-                Html::from_html_unchecked(AttrValue::from(colored))
-            } else {
-                Html::from(frame.content.clone())
-            }
-        } else {
-            Html::from("")
-        }
-    } else {
-        Html::from("")
+    let on_toggle_color = {
+        let color_enabled = color_enabled.clone();
+        Callback::from(move |_| {
+            color_enabled.set(!*color_enabled);
+        })
     };
 
-    let has_colors = frame_count > 0
+    let play_pause_icon = if *is_playing { pause_svg } else { play_svg };
+
+    // Check if any loaded frame has color data
+    let color_available = frame_count > 0
+        && frames.iter().any(|f| f.cframe.is_some());
+
+    let has_colors = *color_enabled && color_available
         && frames
             .get(current_frame)
-            .map(|f| f.colors.is_some())
+            .map(|f| f.cframe.is_some())
             .unwrap_or(false);
 
     html! {
@@ -545,9 +597,11 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                 } else if frames.is_empty() {
                     <div class="no-frames">{"No frames available"}</div>
                 } else {
-                    <pre class="ascii-frame-content" style={font_size_style}>{
-                        frame_html
-                    }</pre>
+                    if has_colors {
+                        <canvas ref={canvas_ref.clone()} class="ascii-frame-canvas"></canvas>
+                    } else {
+                        <pre class="ascii-frame-content" style={font_size_style.clone()} ref={content_ref.clone()}></pre>
+                    }
                     <div class="frame-info-overlay">
                         <span class="info-left">{format!("FPS: {}", *current_fps)}</span>
                         <span class="info-center">{format!("{}/{}", current_frame + 1, frame_count)}</span>
@@ -588,6 +642,15 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                         min="1"
                         oninput={on_fps_change}
                     />
+                    <button
+                        class={if *color_enabled && color_available { "ctrl-btn color-btn active" } else if !color_available { "ctrl-btn color-btn disabled" } else { "ctrl-btn color-btn" }}
+                        type="button"
+                        onclick={on_toggle_color}
+                        disabled={!color_available}
+                        title={if !color_available { "No color data available" } else if *color_enabled { "Color enabled" } else { "Color disabled" }}
+                    >
+                        {color_svg}
+                    </button>
                     <div style="flex: 1;"></div>
                     <button
                         class="ctrl-btn"
