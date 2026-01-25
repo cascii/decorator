@@ -29,6 +29,7 @@ export function observeResize(element, callback) {
 export function disconnectObserver(observer) {
   observer.disconnect();
 }
+
 "#)]
 extern "C" {
     #[wasm_bindgen(js_name = tauriInvoke)]
@@ -39,6 +40,7 @@ extern "C" {
 
     #[wasm_bindgen(js_name = disconnectObserver)]
     fn disconnect_observer(observer: &JsValue);
+
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -61,6 +63,13 @@ struct CFrameData {
 struct Frame {
     content: String,
     cframe: Option<CFrameData>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct ProjectDetails {
+    fps: Option<u32>,
+    has_audio: bool,
+    audio_path: Option<String>,
 }
 
 #[derive(Properties, PartialEq, Clone)]
@@ -96,6 +105,12 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     // FPS control
     let current_fps = use_state(|| props.fps);
 
+    // Audio state
+    let audio_ref = use_node_ref();
+    let audio_src = use_state(|| None::<String>);
+    let audio_volume = use_state(|| 0.5f64);
+    let audio_muted = use_state(|| false);
+
     // Sync ref when current_index state changes
     {
         let current_index_ref = current_index_ref.clone();
@@ -115,6 +130,8 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
         let interval_handle = interval_handle.clone();
         let is_playing = is_playing.clone();
         let loading_progress = loading_progress.clone();
+        let current_fps = current_fps.clone();
+        let audio_src = audio_src.clone();
 
         use_effect_with(directory_path.clone(), move |_| {
             loading_progress.set((0, 0));
@@ -123,6 +140,7 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
             frames.set(Vec::new());
             current_index.set(0);
             is_playing.set(false);
+            audio_src.set(None);
 
             interval_handle.borrow_mut().take();
 
@@ -130,6 +148,29 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                 is_loading.set(false);
             } else {
                 wasm_bindgen_futures::spawn_local(async move {
+                    // Load project details (FPS, audio path)
+                    let details_args =
+                        serde_wasm_bindgen::to_value(&json!({ "directoryPath": directory_path }))
+                            .unwrap();
+                    if let Ok(details) = serde_wasm_bindgen::from_value::<ProjectDetails>(
+                        tauri_invoke("read_project_details", details_args).await
+                    ) {
+                        if let Some(fps) = details.fps {
+                            current_fps.set(fps);
+                        }
+                        if let Some(audio_path) = details.audio_path {
+                            // Load audio as data URL
+                            let audio_args =
+                                serde_wasm_bindgen::to_value(&json!({ "audioPath": audio_path }))
+                                    .unwrap();
+                            if let Ok(data_url) = serde_wasm_bindgen::from_value::<String>(
+                                tauri_invoke("read_audio_file", audio_args).await
+                            ) {
+                                audio_src.set(Some(data_url));
+                            }
+                        }
+                    }
+
                     // Get total frame count
                     let count_args =
                         serde_wasm_bindgen::to_value(&json!({ "directoryPath": directory_path }))
@@ -258,6 +299,53 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                 *interval_handle.borrow_mut() = Some(interval);
             }
 
+            || ()
+        });
+    }
+
+    // Audio playback control - sync with frame playback
+    {
+        let audio_ref = audio_ref.clone();
+        let playing = *is_playing;
+        let current_frame_idx = *current_index;
+        let frame_count = frames.len();
+        let fps = *current_fps;
+        let has_audio = audio_src.is_some();
+
+        use_effect_with((playing, has_audio), move |_| {
+            if has_audio {
+                if let Some(audio) = audio_ref.cast::<web_sys::HtmlAudioElement>() {
+                    if playing {
+                        // Calculate the time position based on current frame
+                        if frame_count > 0 && fps > 0 {
+                            let target_time = current_frame_idx as f64 / fps as f64;
+                            // Only seek if we're significantly out of sync (> 0.1s)
+                            let current_time = audio.current_time();
+                            if (current_time - target_time).abs() > 0.1 {
+                                audio.set_current_time(target_time);
+                            }
+                        }
+                        let _ = audio.play();
+                    } else {
+                        audio.pause().ok();
+                    }
+                }
+            }
+            || ()
+        });
+    }
+
+    // Volume and mute control effect
+    {
+        let audio_ref = audio_ref.clone();
+        let volume = *audio_volume;
+        let muted = *audio_muted;
+
+        use_effect_with((volume, muted), move |_| {
+            if let Some(audio) = audio_ref.cast::<web_sys::HtmlAudioElement>() {
+                audio.set_volume(volume);
+                audio.set_muted(muted);
+            }
             || ()
         });
     }
@@ -454,6 +542,8 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
         let current_index = current_index.clone();
         let is_playing = is_playing.clone();
         let frames = frames.clone();
+        let audio_ref = audio_ref.clone();
+        let fps = *current_fps;
         Callback::from(move |e: web_sys::InputEvent| {
             if let Some(target) = e.target() {
                 if let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() {
@@ -466,6 +556,12 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                                     as usize;
                             is_playing.set(false);
                             current_index.set(target_frame);
+
+                            // Seek audio to match frame
+                            if let Some(audio) = audio_ref.cast::<web_sys::HtmlAudioElement>() {
+                                let target_time = target_frame as f64 / fps as f64;
+                                audio.set_current_time(target_time);
+                            }
                         }
                     }
                 }
@@ -485,6 +581,27 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                     }
                 }
             }
+        })
+    };
+
+    let on_volume_change = {
+        let audio_volume = audio_volume.clone();
+        Callback::from(move |e: web_sys::InputEvent| {
+            if let Some(target) = e.target() {
+                if let Ok(input) = target.dyn_into::<web_sys::HtmlInputElement>() {
+                    let vol = input.value_as_number();
+                    if vol.is_finite() {
+                        audio_volume.set(vol.clamp(0.0, 1.0));
+                    }
+                }
+            }
+        })
+    };
+
+    let on_toggle_mute = {
+        let audio_muted = audio_muted.clone();
+        Callback::from(move |_| {
+            audio_muted.set(!*audio_muted);
         })
     };
 
@@ -567,6 +684,12 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     let color_svg = Html::from_html_unchecked(AttrValue::from(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08"></path><path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02z"></path></svg>"#
     ));
+    let volume_svg = Html::from_html_unchecked(AttrValue::from(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"></path><path d="M16 9a5 5 0 0 1 0 6"></path><path d="M19.364 18.364a9 9 0 0 0 0-12.728"></path></svg>"#
+    ));
+    let mute_svg = Html::from_html_unchecked(AttrValue::from(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"></path><line x1="22" x2="16" y1="9" y2="15"></line><line x1="16" x2="22" y1="9" y2="15"></line></svg>"#
+    ));
 
     let on_toggle_color = {
         let color_enabled = color_enabled.clone();
@@ -587,8 +710,15 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
             .map(|f| f.cframe.is_some())
             .unwrap_or(false);
 
+    let audio_data_url = (*audio_src).clone().unwrap_or_default();
+    let has_audio = audio_src.is_some();
+    let mute_icon = if *audio_muted { mute_svg } else { volume_svg };
+
     html! {
         <div class="ascii-frames-viewer">
+            if has_audio {
+                <audio ref={audio_ref} src={audio_data_url} preload="auto" style="display: none;"></audio>
+            }
             <div class="frames-display" ref={container_ref}>
                 if *is_loading {
                     <div class="loading-frames">{loading_message}</div>
@@ -611,65 +741,28 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
             </div>
 
             <div class="controls">
+                // Row 1: Progress bar + Play/Pause button
                 <div class="control-row">
-                    <input
-                        class="progress"
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.001"
-                        value={progress.to_string()}
-                        oninput={on_seek}
-                        disabled={frame_count == 0}
-                    />
-                    <button
-                        class="ctrl-btn play-btn"
-                        type="button"
-                        onclick={on_toggle_play}
-                        disabled={frame_count == 0}
-                        title={if *is_playing { "Pause" } else { "Play" }}
-                    >
-                        {play_pause_icon}
-                    </button>
+                    <input id="progress-slider" class="progress" type="range" min="0" max="1" step="0.001" value={progress.to_string()} oninput={on_seek} disabled={frame_count == 0} />
+                    <button id="play-pause-btn" class="ctrl-btn play-btn" type="button" onclick={on_toggle_play} disabled={frame_count == 0} title={if *is_playing { "Pause" } else { "Play" }}>{play_pause_icon}</button>
                 </div>
 
+                // Row 2: Volume slider + Mute button (only if audio)
+                if has_audio {
+                    <div class="control-row">
+                        <input id="volume-slider" class="volume-slider" type="range" min="0" max="1" step="0.01" value={audio_volume.to_string()} oninput={on_volume_change} />
+                        <button id="mute-btn" class={if *audio_muted { "ctrl-btn mute-btn muted" } else { "ctrl-btn mute-btn" }} type="button" onclick={on_toggle_mute} title={if *audio_muted { "Unmute" } else { "Mute" }}>{mute_icon}</button>
+                    </div>
+                }
+
+                // Row 3: FPS, color, forward/backward buttons
                 <div class="control-row">
                     <label>{"FPS:"}</label>
-                    <input
-                        type="number"
-                        class="fps-input"
-                        value={current_fps.to_string()}
-                        min="1"
-                        oninput={on_fps_change}
-                    />
-                    <button
-                        class={if *color_enabled && color_available { "ctrl-btn color-btn active" } else if !color_available { "ctrl-btn color-btn disabled" } else { "ctrl-btn color-btn" }}
-                        type="button"
-                        onclick={on_toggle_color}
-                        disabled={!color_available}
-                        title={if !color_available { "No color data available" } else if *color_enabled { "Color enabled" } else { "Color disabled" }}
-                    >
-                        {color_svg}
-                    </button>
+                    <input id="fps-input" type="number" class="fps-input" value={current_fps.to_string()} min="1" oninput={on_fps_change} />
+                    <button id="color-btn" class={if *color_enabled && color_available { "ctrl-btn color-btn active" } else if !color_available { "ctrl-btn color-btn disabled" } else { "ctrl-btn color-btn" }} type="button" onclick={on_toggle_color} disabled={!color_available} title={if !color_available { "No color data available" } else if *color_enabled { "Color enabled" } else { "Color disabled" }}>{color_svg}</button>
                     <div style="flex: 1;"></div>
-                    <button
-                        class="ctrl-btn"
-                        type="button"
-                        onclick={on_step_backward}
-                        disabled={frame_count == 0}
-                        title="Step backward"
-                    >
-                        {skip_backward_svg}
-                    </button>
-                    <button
-                        class="ctrl-btn"
-                        type="button"
-                        onclick={on_step_forward}
-                        disabled={frame_count == 0}
-                        title="Step forward"
-                    >
-                        {skip_forward_svg}
-                    </button>
+                    <button id="step-backward-btn" class="ctrl-btn" type="button" onclick={on_step_backward} disabled={frame_count == 0} title="Step backward">{skip_backward_svg}</button>
+                    <button id="step-forward-btn" class="ctrl-btn" type="button" onclick={on_step_forward} disabled={frame_count == 0} title="Step forward">{skip_forward_svg}</button>
                 </div>
             </div>
         </div>
