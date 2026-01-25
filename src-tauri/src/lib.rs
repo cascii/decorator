@@ -235,6 +235,72 @@ fn get_frame_count(directory_path: String) -> Result<usize, String> {
     Ok(frames.len())
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct ProjectDetails {
+    pub fps: Option<u32>,
+    pub has_audio: bool,
+    pub audio_path: Option<String>,
+}
+
+/// Read audio file and return as base64 for data URL
+#[tauri::command]
+fn read_audio_file(audio_path: String) -> Result<String, String> {
+    let path = PathBuf::from(&audio_path);
+    if !path.exists() {
+        return Err("Audio file does not exist".to_string());
+    }
+
+    let data = fs::read(&path)
+        .map_err(|e| format!("Failed to read audio file: {}", e))?;
+
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let b64 = STANDARD.encode(&data);
+
+    // Return as data URL
+    Ok(format!("data:audio/mpeg;base64,{}", b64))
+}
+
+/// Read details.md from the directory and parse project metadata
+#[tauri::command]
+fn read_project_details(directory_path: String) -> Result<ProjectDetails, String> {
+    let dir = PathBuf::from(&directory_path);
+
+    // Handle single file drop - get parent directory
+    let dir = if dir.is_file() {
+        dir.parent().map(|p| p.to_path_buf()).unwrap_or(dir)
+    } else {
+        dir
+    };
+
+    let details_path = dir.join("details.md");
+    let audio_path = dir.join("audio.mp3");
+
+    let mut fps: Option<u32> = None;
+    let has_audio = audio_path.exists();
+    let audio_path_str = if has_audio {
+        Some(audio_path.to_string_lossy().to_string())
+    } else {
+        None
+    };
+
+    // Parse details.md if it exists
+    if details_path.exists() {
+        if let Ok(content) = fs::read_to_string(&details_path) {
+            for line in content.lines() {
+                if let Some(value) = line.strip_prefix("FPS:") {
+                    fps = value.trim().parse::<u32>().ok();
+                }
+            }
+        }
+    }
+
+    Ok(ProjectDetails {
+        fps,
+        has_audio,
+        audio_path: audio_path_str,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -244,7 +310,9 @@ pub fn run() {
             read_frame_file,
             read_colors_file,
             read_cframe_file,
-            get_frame_count
+            get_frame_count,
+            read_project_details,
+            read_audio_file
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {

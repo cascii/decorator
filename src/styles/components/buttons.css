@@ -66,3 +66,21 @@
   background: var(--color-surface-hover);
   border-color: var(--color-border-hover);
 }
+
+/* Color button active state */
+.ascii-frames-viewer .color-btn.active {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+/* Mute button */
+.ascii-frames-viewer .mute-btn {
+  width: 42px;
+  height: 42px;
+  min-width: 42px;
+  min-height: 42px;
+}
+
+.ascii-frames-viewer .mute-btn.muted {
+  color: var(--color-text-muted);
+}
