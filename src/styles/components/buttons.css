@@ -4,10 +4,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 38px;
-  height: 38px;
-  min-width: 38px;
-  min-height: 38px;
+  width: 42px;
+  height: 42px;
+  min-width: 42px;
+  min-height: 42px;
   border-radius: var(--radius-md);
   background: var(--color-surface-elevated);
   color: var(--color-text);
@@ -26,13 +26,6 @@
   height: 20px;
 }
 
-.ascii-frames-viewer .play-btn {
-  width: 42px;
-  height: 42px;
-  min-width: 42px;
-  min-height: 42px;
-}
-
 .ascii-frames-viewer .ctrl-btn:hover {
   background: var(--color-surface-hover);
   border-color: var(--color-border-hover);
@@ -47,40 +40,14 @@
   cursor: not-allowed;
 }
 
-/* Clear button */
-.clear-btn {
-  position: absolute;
-  top: var(--spacing-sm);
-  right: var(--spacing-sm);
-  padding: var(--spacing-xs) var(--spacing-md);
-  font-size: 0.75rem;
-  background: var(--color-surface-elevated);
-  color: var(--color-text);
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  z-index: 10;
-}
-
-.clear-btn:hover {
-  background: var(--color-surface-hover);
-  border-color: var(--color-border-hover);
-}
-
 /* Color button active state */
 .ascii-frames-viewer .color-btn.active {
   background: var(--color-accent);
   border-color: var(--color-accent);
 }
 
-/* Mute button */
-.ascii-frames-viewer .mute-btn {
-  width: 42px;
-  height: 42px;
-  min-width: 42px;
-  min-height: 42px;
-}
-
+/* Mute button muted state */
 .ascii-frames-viewer .mute-btn.muted {
   color: var(--color-text-muted);
 }
+
