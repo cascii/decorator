@@ -119,14 +119,12 @@ pub fn app() -> Html {
                         <p style="font-size: 0.85rem; color: #666;">{"Supports folders with .txt frame files"}</p>
                     </div>
                 } else {
-                    <div style="position: relative; width: 100%; height: 100%;">
-                        <button class="clear-btn" onclick={on_clear}>{"Clear"}</button>
-                        <AsciiFramesViewer
-                            directory_path={(*directory_path).clone()}
-                            fps={24}
-                            loop_enabled={true}
-                        />
-                    </div>
+                    <AsciiFramesViewer
+                        directory_path={(*directory_path).clone()}
+                        fps={24}
+                        loop_enabled={true}
+                        on_clear={on_clear}
+                    />
                 }
             </div>
         </main>

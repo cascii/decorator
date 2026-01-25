@@ -79,6 +79,8 @@ pub struct AsciiFramesViewerProps {
     pub fps: u32,
     #[prop_or(true)]
     pub loop_enabled: bool,
+    #[prop_or_default]
+    pub on_clear: Callback<()>,
 }
 
 #[function_component(AsciiFramesViewer)]
@@ -110,6 +112,12 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     let audio_src = use_state(|| None::<String>);
     let audio_volume = use_state(|| 0.5f64);
     let audio_muted = use_state(|| false);
+
+    // Overlay visibility toggle
+    let overlay_hidden = use_state(|| false);
+
+    // Hover state for showing controls when overlay is hidden
+    let is_hovering = use_state(|| false);
 
     // Sync ref when current_index state changes
     {
@@ -690,11 +698,48 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     let mute_svg = Html::from_html_unchecked(AttrValue::from(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"></path><line x1="22" x2="16" y1="9" y2="15"></line><line x1="16" x2="22" y1="9" y2="15"></line></svg>"#
     ));
+    let circle_x_svg = Html::from_html_unchecked(AttrValue::from(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="m15 9-6 6"></path><path d="m9 9 6 6"></path></svg>"#
+    ));
+    let eye_svg = Html::from_html_unchecked(AttrValue::from(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"></path><circle cx="12" cy="12" r="3"></circle></svg>"#
+    ));
+    let eye_off_svg = Html::from_html_unchecked(AttrValue::from(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"></path><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"></path><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"></path><path d="m2 2 20 20"></path></svg>"#
+    ));
 
     let on_toggle_color = {
         let color_enabled = color_enabled.clone();
         Callback::from(move |_| {
             color_enabled.set(!*color_enabled);
+        })
+    };
+
+    let on_clear_click = {
+        let on_clear = props.on_clear.clone();
+        Callback::from(move |_| {
+            on_clear.emit(());
+        })
+    };
+
+    let on_toggle_overlay = {
+        let overlay_hidden = overlay_hidden.clone();
+        Callback::from(move |_| {
+            overlay_hidden.set(!*overlay_hidden);
+        })
+    };
+
+    let on_mouse_enter = {
+        let is_hovering = is_hovering.clone();
+        Callback::from(move |_: web_sys::MouseEvent| {
+            is_hovering.set(true);
+        })
+    };
+
+    let on_mouse_leave = {
+        let is_hovering = is_hovering.clone();
+        Callback::from(move |_: web_sys::MouseEvent| {
+            is_hovering.set(false);
         })
     };
 
@@ -713,9 +758,13 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     let audio_data_url = (*audio_src).clone().unwrap_or_default();
     let has_audio = audio_src.is_some();
     let mute_icon = if *audio_muted { mute_svg } else { volume_svg };
+    let overlay_icon = if *overlay_hidden { eye_off_svg } else { eye_svg };
+
+    let viewer_class = if *overlay_hidden { "ascii-frames-viewer fullscreen-mode" } else { "ascii-frames-viewer" };
+    let show_controls = !*overlay_hidden || *is_hovering;
 
     html! {
-        <div class="ascii-frames-viewer">
+        <div class={viewer_class} onmouseenter={on_mouse_enter} onmouseleave={on_mouse_leave}>
             if has_audio {
                 <audio ref={audio_ref} src={audio_data_url} preload="auto" style="display: none;"></audio>
             }
@@ -732,39 +781,51 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                     } else {
                         <pre class="ascii-frame-content" style={font_size_style.clone()} ref={content_ref.clone()}></pre>
                     }
-                    <div class="frame-info-overlay">
-                        <span class="info-left">{format!("FPS: {}", *current_fps)}</span>
-                        <span class="info-center">{format!("{}/{}", current_frame + 1, frame_count)}</span>
-                        <span class="info-right">{if has_colors { "Color" } else { "" }}</span>
-                    </div>
+                    if !*overlay_hidden {
+                        <div class="frame-info-overlay">
+                            <span class="info-left">{format!("FPS: {}", *current_fps)}</span>
+                            <span class="info-center">{format!("{}/{}", current_frame + 1, frame_count)}</span>
+                            <span class="info-right">{if has_colors { "Color" } else { "" }}</span>
+                        </div>
+                    }
                 }
             </div>
 
-            <div class="controls">
-                // Row 1: Progress bar + Play/Pause button
-                <div class="control-row">
-                    <input id="progress-slider" class="progress" type="range" min="0" max="1" step="0.001" value={progress.to_string()} oninput={on_seek} disabled={frame_count == 0} />
-                    <button id="play-pause-btn" class="ctrl-btn play-btn" type="button" onclick={on_toggle_play} disabled={frame_count == 0} title={if *is_playing { "Pause" } else { "Play" }}>{play_pause_icon}</button>
-                </div>
+            if show_controls {
+                <div class="controls">
+                    // Row 1: Progress bar + Play/Pause button (only for multiple frames)
+                    if frame_count > 1 {
+                        <div class="control-row">
+                            <input id="progress-slider" class="progress" type="range" min="0" max="1" step="0.001" value={progress.to_string()} oninput={on_seek} disabled={frame_count == 0} />
+                            <button id="play-pause-btn" class="ctrl-btn play-btn" type="button" onclick={on_toggle_play} disabled={frame_count == 0} title={if *is_playing { "Pause" } else { "Play" }}>{play_pause_icon}</button>
+                        </div>
+                    }
 
-                // Row 2: Volume slider + Mute button (only if audio)
-                if has_audio {
+                    // Row 2: Volume slider + Mute button (only if audio)
+                    if has_audio {
+                        <div class="control-row">
+                            <input id="volume-slider" class="volume-slider" type="range" min="0" max="1" step="0.01" value={audio_volume.to_string()} oninput={on_volume_change} />
+                            <button id="mute-btn" class={if *audio_muted { "ctrl-btn mute-btn muted" } else { "ctrl-btn mute-btn" }} type="button" onclick={on_toggle_mute} title={if *audio_muted { "Unmute" } else { "Mute" }}>{mute_icon}</button>
+                        </div>
+                    }
+
+                    // Row 3: FPS, color, clear, forward/backward buttons
                     <div class="control-row">
-                        <input id="volume-slider" class="volume-slider" type="range" min="0" max="1" step="0.01" value={audio_volume.to_string()} oninput={on_volume_change} />
-                        <button id="mute-btn" class={if *audio_muted { "ctrl-btn mute-btn muted" } else { "ctrl-btn mute-btn" }} type="button" onclick={on_toggle_mute} title={if *audio_muted { "Unmute" } else { "Mute" }}>{mute_icon}</button>
+                        if frame_count > 1 {
+                            <label>{"FPS:"}</label>
+                            <input id="fps-input" type="number" class="fps-input" value={current_fps.to_string()} min="1" oninput={on_fps_change} />
+                        }
+                        <button id="color-btn" class={if *color_enabled && color_available { "ctrl-btn color-btn active" } else if !color_available { "ctrl-btn color-btn disabled" } else { "ctrl-btn color-btn" }} type="button" onclick={on_toggle_color} disabled={!color_available} title={if !color_available { "No color data available" } else if *color_enabled { "Color enabled" } else { "Color disabled" }}>{color_svg}</button>
+                        <button id="hide-overlay-btn" class={if *overlay_hidden { "ctrl-btn active" } else { "ctrl-btn" }} type="button" onclick={on_toggle_overlay} title={if *overlay_hidden { "Show overlay" } else { "Hide overlay" }}>{overlay_icon}</button>
+                        <button id="clear-btn" class="ctrl-btn" type="button" onclick={on_clear_click} title="Clear">{circle_x_svg}</button>
+                        if frame_count > 1 {
+                            <div style="flex: 1;"></div>
+                            <button id="step-backward-btn" class="ctrl-btn" type="button" onclick={on_step_backward} disabled={frame_count == 0} title="Step backward">{skip_backward_svg}</button>
+                            <button id="step-forward-btn" class="ctrl-btn" type="button" onclick={on_step_forward} disabled={frame_count == 0} title="Step forward">{skip_forward_svg}</button>
+                        }
                     </div>
-                }
-
-                // Row 3: FPS, color, forward/backward buttons
-                <div class="control-row">
-                    <label>{"FPS:"}</label>
-                    <input id="fps-input" type="number" class="fps-input" value={current_fps.to_string()} min="1" oninput={on_fps_change} />
-                    <button id="color-btn" class={if *color_enabled && color_available { "ctrl-btn color-btn active" } else if !color_available { "ctrl-btn color-btn disabled" } else { "ctrl-btn color-btn" }} type="button" onclick={on_toggle_color} disabled={!color_available} title={if !color_available { "No color data available" } else if *color_enabled { "Color enabled" } else { "Color disabled" }}>{color_svg}</button>
-                    <div style="flex: 1;"></div>
-                    <button id="step-backward-btn" class="ctrl-btn" type="button" onclick={on_step_backward} disabled={frame_count == 0} title="Step backward">{skip_backward_svg}</button>
-                    <button id="step-forward-btn" class="ctrl-btn" type="button" onclick={on_step_forward} disabled={frame_count == 0} title="Step forward">{skip_forward_svg}</button>
                 </div>
-            </div>
+            }
         </div>
     }
 }
