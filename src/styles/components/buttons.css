@@ -1,0 +1,53 @@
+/* Button component styles */
+
+.ascii-frames-viewer .ctrl-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  min-width: 42px;
+  min-height: 42px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-light);
+  box-shadow: none;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s;
+  padding: 0;
+  font-size: 1rem;
+  font-weight: bold;
+}
+
+.ascii-frames-viewer .ctrl-btn svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+
+.ascii-frames-viewer .ctrl-btn:hover {
+  background: var(--color-surface-hover);
+  border-color: var(--color-border-hover);
+}
+
+.ascii-frames-viewer .ctrl-btn:active {
+  background: var(--color-surface);
+}
+
+.ascii-frames-viewer .ctrl-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Color button active state */
+.ascii-frames-viewer .color-btn.active {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+/* Mute button muted state */
+.ascii-frames-viewer .mute-btn.muted {
+  color: var(--color-text-muted);
+}
+

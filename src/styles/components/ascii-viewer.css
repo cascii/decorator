@@ -1,0 +1,146 @@
+/* ASCII Frames Viewer component styles */
+
+.ascii-frames-viewer {
+  position: relative;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  gap: var(--spacing-sm);
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+/* Fullscreen mode - when overlay is hidden */
+.ascii-frames-viewer.fullscreen-mode {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100vw;
+  height: 100vh;
+  grid-template-rows: 1fr;
+  gap: 0;
+  z-index: 100;
+}
+
+.ascii-frames-viewer.fullscreen-mode .frames-display {
+  border: none;
+  border-radius: 0;
+}
+
+.ascii-frames-viewer.fullscreen-mode .controls {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  border-radius: 0;
+  border: none;
+  background: transparent;
+  z-index: 10;
+}
+
+/* Frame display area */
+.frames-display {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 60px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-black);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text);
+  font-size: 0.9rem;
+}
+
+.ascii-frame-content {
+  white-space: pre;
+  font-family: var(--font-mono);
+  line-height: 1.11;
+  overflow: hidden;
+  margin: 0;
+  padding: 10px;
+  box-sizing: border-box;
+  text-align: center;
+  color: var(--color-text);
+  background-color: transparent;
+  border: none;
+}
+
+/* Frame info overlay */
+.frame-info-overlay {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  right: 8px;
+  padding: 4px 12px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #ffffff;
+  font-size: 0.875rem;
+  font-family: monospace;
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+  z-index: 5;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.frame-info-overlay .info-left,
+.frame-info-overlay .info-center,
+.frame-info-overlay .info-right {
+  flex: 1;
+}
+
+.frame-info-overlay .info-left {
+  text-align: left;
+}
+
+.frame-info-overlay .info-center {
+  text-align: center;
+}
+
+.frame-info-overlay .info-right {
+  text-align: right;
+}
+
+/* State messages */
+.loading-frames,
+.error-frames,
+.no-frames {
+  padding: 2rem;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 1rem;
+}
+
+.error-frames {
+  color: var(--color-error);
+}
+
+/* Controls section */
+.ascii-frames-viewer .controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.ascii-frames-viewer .control-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  width: 100%;
+}
+
+.ascii-frames-viewer .control-row label {
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+}
