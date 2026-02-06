@@ -1,6 +1,6 @@
 [package]
 name = "decorator"
-version = "0.8.0"
+version = "0.9.0"
 description = "lightweight tauri frame for cascii generated art"
 authors = ["you"]
 license = ""
@@ -16,7 +16,7 @@ tauri-plugin-opener = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "0.22"
-cascii-core-view = { path = "../../cascii-core-view", features = ["serde"] }
+cascii-core-view = { git = "https://github.com/cascii/cascii-core-view.git", branch = "master", features = ["serde"] }
 
 [features]
 default = ["custom-protocol"]

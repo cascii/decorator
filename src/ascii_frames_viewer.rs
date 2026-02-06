@@ -9,7 +9,8 @@ use yew::prelude::*;
 
 // Use shared types from cascii-core-view
 use cascii_core_view::{
-    FontSizing, Frame, FrameFile, LoadingPhase, RenderConfig,
+    load_color_frames, load_text_frames, FontSizing, Frame, FrameDataProvider, FrameFile,
+    LoadResult, LoadingPhase, RenderConfig,
 };
 use cascii_core_view::render::render_cframe;
 
@@ -62,6 +63,57 @@ export function decodeBase64ToBytes(b64) {
 extern "C" {
     #[wasm_bindgen(js_name = decodeBase64ToBytes)]
     fn decode_base64_to_bytes(b64: &str) -> js_sys::Uint8Array;
+}
+
+struct TauriFrameProvider;
+
+impl FrameDataProvider for TauriFrameProvider {
+    fn get_frame_files(&self, directory: &str) -> impl std::future::Future<Output = LoadResult<Vec<FrameFile>>> {
+        let dir = directory.to_string();
+        async move {
+            let args =
+                serde_wasm_bindgen::to_value(&json!({ "directoryPath": dir })).unwrap();
+            serde_wasm_bindgen::from_value::<Vec<FrameFile>>(
+                tauri_invoke("get_frame_files", args).await,
+            )
+            .map_err(|e| format!("Failed to list frames: {:?}", e))
+        }
+    }
+
+    fn read_frame_text(&self, path: &str) -> impl std::future::Future<Output = LoadResult<String>> {
+        let path = path.to_string();
+        async move {
+            let args =
+                serde_wasm_bindgen::to_value(&json!({ "filePath": path })).unwrap();
+            serde_wasm_bindgen::from_value::<String>(
+                tauri_invoke("read_frame_file", args).await,
+            )
+            .map_err(|e| format!("Failed to read frame: {:?}", e))
+        }
+    }
+
+    fn read_cframe_bytes(&self, txt_path: &str) -> impl std::future::Future<Output = LoadResult<Option<Vec<u8>>>> {
+        let path = txt_path.to_string();
+        async move {
+            let args =
+                serde_wasm_bindgen::to_value(&json!({ "txtFilePath": path })).unwrap();
+            let cframe_b64: Option<String> =
+                serde_wasm_bindgen::from_value::<Option<String>>(
+                    tauri_invoke("read_cframe_file", args).await,
+                )
+                .unwrap_or(None);
+            Ok(cframe_b64.map(|b64| decode_base64_to_bytes(&b64).to_vec()))
+        }
+    }
+}
+
+async fn wasm_yield() {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        let _ = web_sys::window()
+            .unwrap()
+            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0);
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -189,104 +241,40 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                     }
                 }
 
-                // Get list of frame files
-                let args =
-                    serde_wasm_bindgen::to_value(&json!({ "directoryPath": directory_path }))
-                        .unwrap();
+                // Two-phase loading via cascii-core-view orchestrators
+                let provider = TauriFrameProvider;
+                match load_text_frames(&provider, &directory_path).await {
+                    Ok((loaded_frames, frame_files)) => {
+                        let total = loaded_frames.len();
+                        *frames_ref.borrow_mut() = loaded_frames;
+                        frame_count.set(total);
+                        *color_progress.borrow_mut() = (0, total);
+                        loading_phase.set(LoadingPhase::LoadingColors);
 
-                let frame_files = match tauri_invoke("get_frame_files", args).await {
-                    result => match serde_wasm_bindgen::from_value::<Vec<FrameFile>>(result) {
-                        Ok(files) => files,
-                        Err(e) => {
-                            loading_error.set(Some(format!("Failed to list frames: {:?}", e)));
-                            loading_phase.set(LoadingPhase::Idle);
-                            return;
-                        }
+                        let frames_for_color = frames_ref.clone();
+                        let progress_for_color = color_progress.clone();
+                        let _ = load_color_frames(
+                            &provider,
+                            &frame_files,
+                            |i, _total, cf| {
+                                if let Some(cframe) = cf {
+                                    let mut frames = frames_for_color.borrow_mut();
+                                    if i < frames.len() {
+                                        frames[i].cframe = Some(cframe);
+                                    }
+                                }
+                                *progress_for_color.borrow_mut() = (i + 1, total);
+                            },
+                            wasm_yield,
+                        )
+                        .await;
+                        loading_phase.set(LoadingPhase::Complete);
                     }
-                };
-
-                if frame_files.is_empty() {
-                    loading_error.set(Some("No frames found in directory".to_string()));
-                    loading_phase.set(LoadingPhase::Idle);
-                    return;
-                }
-
-                let total_frames = frame_files.len();
-                *color_progress.borrow_mut() = (0, total_frames);
-
-                // PHASE 1: Load all text frames (fast)
-                let mut loaded_frames: Vec<Frame> = Vec::with_capacity(total_frames);
-
-                for frame_file in frame_files.iter() {
-                    let args = serde_wasm_bindgen::to_value(
-                        &json!({ "filePath": frame_file.path }),
-                    )
-                    .unwrap();
-
-                    let content = match tauri_invoke("read_frame_file", args).await {
-                        result => match serde_wasm_bindgen::from_value::<String>(result) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                loading_error.set(Some(format!(
-                                    "Failed to read frame {}: {:?}",
-                                    frame_file.name, e
-                                )));
-                                loading_phase.set(LoadingPhase::Idle);
-                                return;
-                            }
-                        }
-                    };
-
-                    loaded_frames.push(Frame::text_only(content));
-                }
-
-                // Store frames and update count (triggers re-render once)
-                *frames_ref.borrow_mut() = loaded_frames;
-                frame_count.set(total_frames);
-                loading_phase.set(LoadingPhase::LoadingColors);
-
-                // PHASE 2: Load color data in background
-                // Uses RefCell for both frames and progress - ZERO re-renders during this phase.
-                // Progress display piggybacks on animation re-renders (current_index changes).
-                //
-                // The backend sends raw .cframe bytes as base64 instead of parsed CFrameData.
-                // Parsing happens here in WASM to avoid the expensive element-by-element
-                // serde_wasm_bindgen deserialization of Vec<u8> across the JS-WASM boundary.
-                for (i, frame_file) in frame_files.iter().enumerate() {
-                    let cframe_args = serde_wasm_bindgen::to_value(
-                        &json!({ "txtFilePath": frame_file.path }),
-                    )
-                    .unwrap();
-
-                    let cframe_b64: Option<String> = match tauri_invoke("read_cframe_file", cframe_args).await {
-                        result => serde_wasm_bindgen::from_value::<Option<String>>(result)
-                            .unwrap_or(None)
-                    };
-
-                    if let Some(b64) = cframe_b64 {
-                        let bytes = decode_base64_to_bytes(&b64).to_vec();
-                        if let Ok(cf) = cascii_core_view::parse_cframe(&bytes) {
-                            let mut frames = frames_ref.borrow_mut();
-                            if i < frames.len() {
-                                frames[i].cframe = Some(cf);
-                            }
-                        }
+                    Err(e) => {
+                        loading_error.set(Some(e));
+                        loading_phase.set(LoadingPhase::Idle);
                     }
-
-                    *color_progress.borrow_mut() = (i + 1, total_frames);
-
-                    // Yield to the event loop after every frame via setTimeout(0).
-                    // This creates a macrotask boundary, giving setInterval (animation)
-                    // callbacks a chance to fire. Without this, Promise-based microtasks
-                    // from tauri_invoke would starve the animation loop.
-                    let promise = js_sys::Promise::new(&mut |resolve, _| {
-                        let _ = web_sys::window().unwrap()
-                            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0);
-                    });
-                    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
                 }
-
-                loading_phase.set(LoadingPhase::Complete);
             });
             }
 
