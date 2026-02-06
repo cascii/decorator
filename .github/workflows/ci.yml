@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  check-version:
+    name: Check Version Bump
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get current version
+        id: current
+        run: echo "version=$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)" >> $GITHUB_OUTPUT
+
+      - name: Get base version
+        id: base
+        run: |
+          git checkout ${{ github.base_ref }}
+          echo "version=$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)" >> $GITHUB_OUTPUT
+
+      - name: Compare versions
+        run: |
+          echo "Base version: ${{ steps.base.outputs.version }}"
+          echo "Current version: ${{ steps.current.outputs.version }}"
+          if [ "${{ steps.base.outputs.version }}" = "${{ steps.current.outputs.version }}" ]; then
+            echo "⚠️  Version not bumped in Cargo.toml"
+            echo "Please update the version in Cargo.toml before merging"
+            exit 1
+          else
+            echo "✅ Version bumped from ${{ steps.base.outputs.version }} to ${{ steps.current.outputs.version }}"
+          fi
