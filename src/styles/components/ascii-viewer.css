@@ -63,7 +63,6 @@
   line-height: 1.11;
   overflow: hidden;
   margin: 0;
-  padding: 10px;
   box-sizing: border-box;
   text-align: center;
   color: var(--color-text);
@@ -71,41 +70,16 @@
   border: none;
 }
 
-/* Frame info overlay */
-.frame-info-overlay {
-  position: absolute;
-  bottom: 8px;
-  left: 8px;
-  right: 8px;
-  padding: 4px 12px;
-  background: rgba(0, 0, 0, 0.75);
-  color: #ffffff;
-  font-size: 0.875rem;
-  font-family: monospace;
-  border-radius: var(--radius-sm);
-  pointer-events: none;
-  z-index: 5;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+/* Info row in controls */
+.ascii-frames-viewer .info-row {
+  justify-content: flex-start;
+  gap: var(--spacing-md);
 }
 
-.frame-info-overlay .info-left,
-.frame-info-overlay .info-center,
-.frame-info-overlay .info-right {
-  flex: 1;
-}
-
-.frame-info-overlay .info-left {
-  text-align: left;
-}
-
-.frame-info-overlay .info-center {
-  text-align: center;
-}
-
-.frame-info-overlay .info-right {
-  text-align: right;
+.ascii-frames-viewer .info-text {
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
+  color: var(--color-text-muted);
 }
 
 /* State messages */

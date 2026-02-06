@@ -3,23 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::Emitter;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-pub struct FrameFile {
-    pub path: String,
-    pub name: String,
-    pub index: u32,
-}
-
-fn extract_frame_index(stem: &str, fallback: u32) -> u32 {
-    if stem.starts_with("frame_") {
-        stem.strip_prefix("frame_")
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0)
-    } else {
-        let num_str: String = stem.chars().filter(|c| c.is_ascii_digit()).collect();
-        num_str.parse::<u32>().unwrap_or(fallback)
-    }
-}
+// Re-export shared types from cascii-core-view
+use cascii_core_view::FrameFile;
 
 fn scan_frames_in_dir(dir: &PathBuf) -> Result<Vec<FrameFile>, String> {
     // Check if the path is a file (single frame) or directory
@@ -29,11 +14,11 @@ fn scan_frames_in_dir(dir: &PathBuf) -> Result<Vec<FrameFile>, String> {
                 if let Some(file_name) = dir.file_name().and_then(|n| n.to_str()) {
                     // Always use .txt path as canonical reference
                     let txt_path = dir.with_extension("txt");
-                    return Ok(vec![FrameFile {
-                        path: txt_path.to_string_lossy().to_string(),
-                        name: file_name.to_string(),
-                        index: 0,
-                    }]);
+                    return Ok(vec![FrameFile::new(
+                        txt_path.to_string_lossy().to_string(),
+                        file_name.to_string(),
+                        0,
+                    )]);
                 }
             }
         }
@@ -57,14 +42,14 @@ fn scan_frames_in_dir(dir: &PathBuf) -> Result<Vec<FrameFile>, String> {
                         if ext == "txt" || ext == "cframe" {
                             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                                 if seen_stems.insert(stem.to_string()) {
-                                    let index = extract_frame_index(stem, frames.len() as u32);
+                                    let index = FrameFile::extract_index(stem, frames.len() as u32);
                                     // Use .txt path as canonical reference
                                     let txt_path = dir.join(format!("{}.txt", stem));
-                                    frames.push(FrameFile {
-                                        path: txt_path.to_string_lossy().to_string(),
-                                        name: format!("{}.txt", stem),
+                                    frames.push(FrameFile::new(
+                                        txt_path.to_string_lossy().to_string(),
+                                        format!("{}.txt", stem),
                                         index,
-                                    });
+                                    ));
                                 }
                             }
                         }
@@ -98,38 +83,17 @@ fn read_frame_file(file_path: String) -> Result<String, String> {
     let cframe_path = txt_path.with_extension("cframe");
 
     if !cframe_path.exists() {
-        return Err(format!("Neither .txt nor .cframe file exists for: {}", file_path));
+        return Err(format!(
+            "Neither .txt nor .cframe file exists for: {}",
+            file_path
+        ));
     }
 
-    let data = fs::read(&cframe_path)
-        .map_err(|e| format!("Failed to read cframe file: {}", e))?;
+    let data =
+        fs::read(&cframe_path).map_err(|e| format!("Failed to read cframe file: {}", e))?;
 
-    if data.len() < 8 {
-        return Err("CFrame file too small (missing header)".to_string());
-    }
-
-    let width = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    let height = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
-    let pixel_count = width * height;
-    let expected_size = 8 + pixel_count * 4;
-
-    if data.len() < expected_size {
-        return Err(format!("CFrame file size mismatch: expected {} bytes, got {}", expected_size, data.len()));
-    }
-
-    // Reconstruct text with newlines from cframe chars
-    let mut text = String::with_capacity(pixel_count + height);
-    for row in 0..height {
-        for col in 0..width {
-            let idx = row * width + col;
-            let offset = 8 + idx * 4;
-            let ch = data[offset] as char;
-            text.push(ch);
-        }
-        text.push('\n');
-    }
-
-    Ok(text)
+    // Use the shared parser to extract text from cframe
+    cascii_core_view::parse_cframe_text(&data).map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -150,8 +114,8 @@ fn read_colors_file(txt_file_path: String) -> Result<Option<ColorData>, String> 
         return Ok(None);
     }
 
-    let data = fs::read(&colors_path)
-        .map_err(|e| format!("Failed to read colors file: {}", e))?;
+    let data =
+        fs::read(&colors_path).map_err(|e| format!("Failed to read colors file: {}", e))?;
 
     if data.len() < 8 {
         return Err("Colors file too small (missing header)".to_string());
@@ -174,19 +138,11 @@ fn read_colors_file(txt_file_path: String) -> Result<Option<ColorData>, String> 
     Ok(Some(ColorData { width, height, rgb }))
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-pub struct CFrameData {
-    pub width: u32,
-    pub height: u32,
-    pub chars: Vec<u8>,  // ASCII characters (width*height)
-    pub rgb: Vec<u8>,    // RGB flat array (width*height*3)
-}
-
-/// Given a .txt frame file path, look for a matching .cframe file and read it.
-/// The .cframe binary format: 4 bytes width (u32 LE) + 4 bytes height (u32 LE)
-/// + width*height*4 bytes (char, r, g, b per position).
+/// Given a .txt frame file path, look for a matching .cframe file and return raw bytes as base64.
+/// Parsing happens on the WASM side to avoid expensive element-by-element JSON array
+/// deserialization of Vec<u8> fields across the JS-WASM boundary.
 #[tauri::command]
-fn read_cframe_file(txt_file_path: String) -> Result<Option<CFrameData>, String> {
+fn read_cframe_file(txt_file_path: String) -> Result<Option<String>, String> {
     let txt_path = PathBuf::from(&txt_file_path);
     let cframe_path = txt_path.with_extension("cframe");
 
@@ -194,38 +150,11 @@ fn read_cframe_file(txt_file_path: String) -> Result<Option<CFrameData>, String>
         return Ok(None);
     }
 
-    let data = fs::read(&cframe_path)
-        .map_err(|e| format!("Failed to read cframe file: {}", e))?;
+    let data =
+        fs::read(&cframe_path).map_err(|e| format!("Failed to read cframe file: {}", e))?;
 
-    if data.len() < 8 {
-        return Err("CFrame file too small (missing header)".to_string());
-    }
-
-    let width = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-    let height = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-    let pixel_count = width as usize * height as usize;
-    let expected_size = 8 + pixel_count * 4;
-
-    if data.len() < expected_size {
-        return Err(format!(
-            "CFrame file size mismatch: expected {} bytes, got {}",
-            expected_size,
-            data.len()
-        ));
-    }
-
-    let mut chars = Vec::with_capacity(pixel_count);
-    let mut rgb = Vec::with_capacity(pixel_count * 3);
-
-    for i in 0..pixel_count {
-        let offset = 8 + i * 4;
-        chars.push(data[offset]);      // char
-        rgb.push(data[offset + 1]);    // r
-        rgb.push(data[offset + 2]);    // g
-        rgb.push(data[offset + 3]);    // b
-    }
-
-    Ok(Some(CFrameData { width, height, chars, rgb }))
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    Ok(Some(STANDARD.encode(&data)))
 }
 
 #[tauri::command]
@@ -250,10 +179,9 @@ fn read_audio_file(audio_path: String) -> Result<String, String> {
         return Err("Audio file does not exist".to_string());
     }
 
-    let data = fs::read(&path)
-        .map_err(|e| format!("Failed to read audio file: {}", e))?;
+    let data = fs::read(&path).map_err(|e| format!("Failed to read audio file: {}", e))?;
 
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     let b64 = STANDARD.encode(&data);
 
     // Return as data URL
