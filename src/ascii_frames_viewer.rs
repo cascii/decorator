@@ -908,16 +908,6 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
 
             if show_controls {
                 <div class="controls">
-                    // Info row: frame counter + color status
-                    <div class="control-row info-row">
-                        <span class="info-text">{format!("{}/{}", current_frame + 1, total_frames)}</span>
-                        if let Some(ref msg) = color_loading_message {
-                            <span class="info-text">{msg.clone()}</span>
-                        } else if has_colors {
-                            <span class="info-text">{"Color"}</span>
-                        }
-                    </div>
-
                     // Row 1: Progress bar + Play/Pause button (only for multiple frames)
                     if total_frames > 1 {
                         <div class="control-row">
@@ -943,6 +933,12 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                         <button id="color-btn" class={if *color_enabled && color_available { "ctrl-btn color-btn active" } else if !color_available { "ctrl-btn color-btn disabled" } else { "ctrl-btn color-btn" }} type="button" onclick={on_toggle_color} disabled={!color_available} title={if colors_loading { "Loading colors..." } else if !color_available { "No color data available" } else if *color_enabled { "Color enabled" } else { "Color disabled" }}><Icon icon_id={IconId::LucideBrush} width={"16"} height={"16"} /></button>
                         <button id="hide-overlay-btn" class={if *overlay_hidden { "ctrl-btn active" } else { "ctrl-btn" }} type="button" onclick={on_toggle_overlay} title={if *overlay_hidden { "Show overlay" } else { "Hide overlay" }}><Icon icon_id={overlay_icon_id} width={"20"} height={"20"} /></button>
                         <button id="clear-btn" class="ctrl-btn" type="button" onclick={on_clear_click} title="Clear"><Icon icon_id={IconId::LucideXCircle} width={"20"} height={"20"} /></button>
+                        <span class="info-text">{format!("{}/{}", current_frame + 1, total_frames)}</span>
+                        if let Some(ref msg) = color_loading_message {
+                            <span class="info-text">{msg.clone()}</span>
+                        } else if has_colors {
+                            <span class="info-text">{"Color"}</span>
+                        }
                         if total_frames > 1 {
                             <div style="flex: 1;"></div>
                             <button id="step-backward-btn" class="ctrl-btn" type="button" onclick={on_step_backward} disabled={total_frames == 0} title="Step backward"><span style="display: inline-flex; transform: scaleX(-1);"><Icon icon_id={IconId::LucideSkipForward} width={"20"} height={"20"} /></span></button>
