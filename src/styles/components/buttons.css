@@ -24,6 +24,7 @@
   display: block;
   width: 20px;
   height: 20px;
+  fill: currentColor;
 }
 
 .ascii-frames-viewer .ctrl-btn:hover {
@@ -44,6 +45,12 @@
 .ascii-frames-viewer .color-btn.active {
   background: var(--color-accent);
   border-color: var(--color-accent);
+}
+
+/* Clear and overlay buttons: stroke-only icons to preserve detail */
+.ascii-frames-viewer #clear-btn svg,
+.ascii-frames-viewer #hide-overlay-btn svg {
+  fill: none;
 }
 
 /* Mute button muted state */

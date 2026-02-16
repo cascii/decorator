@@ -1,18 +1,20 @@
 use gloo_timers::callback::Interval;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::VecDeque;
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::closure::Closure;
 use yew::prelude::*;
+use yew_icons::{Icon, IconId};
 
 // Use shared types from cascii-core-view
 use cascii_core_view::{
-    load_color_frames, load_text_frames, FontSizing, Frame, FrameDataProvider, FrameFile,
-    LoadResult, LoadingPhase, RenderConfig,
+    draw_cached_canvas, draw_frame_from_cache, load_color_frames, load_text_frames,
+    render_to_offscreen_canvas, yield_to_event_loop, FontSizing, Frame, FrameCanvasCache,
+    FrameDataProvider, FrameFile, LoadResult, LoadingPhase, RenderConfig,
 };
-use cascii_core_view::render::render_cframe;
 
 #[wasm_bindgen(inline_js = r#"
 export async function tauriInvoke(cmd, args) {
@@ -50,20 +52,19 @@ extern "C" {
 
 }
 
-#[wasm_bindgen(inline_js = r#"
-export function decodeBase64ToBytes(b64) {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
+async fn sleep_ms(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        if let Some(window) = web_sys::window() {
+            let _ = window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        } else {
+            let _ = resolve.call0(&wasm_bindgen::JsValue::NULL);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
-"#)]
-extern "C" {
-    #[wasm_bindgen(js_name = decodeBase64ToBytes)]
-    fn decode_base64_to_bytes(b64: &str) -> js_sys::Uint8Array;
-}
+
+const BW_PLAYBACK_BACKGROUND_SLEEP_MS: i32 = 12;
 
 struct TauriFrameProvider;
 
@@ -97,23 +98,12 @@ impl FrameDataProvider for TauriFrameProvider {
         async move {
             let args =
                 serde_wasm_bindgen::to_value(&json!({ "txtFilePath": path })).unwrap();
-            let cframe_b64: Option<String> =
-                serde_wasm_bindgen::from_value::<Option<String>>(
-                    tauri_invoke("read_cframe_file", args).await,
-                )
-                .unwrap_or(None);
-            Ok(cframe_b64.map(|b64| decode_base64_to_bytes(&b64).to_vec()))
+            serde_wasm_bindgen::from_value::<Option<Vec<u8>>>(
+                tauri_invoke("read_cframe_file", args).await,
+            )
+            .map_err(|e| format!("Failed to read cframe file: {:?}", e))
         }
     }
-}
-
-async fn wasm_yield() {
-    let promise = js_sys::Promise::new(&mut |resolve, _| {
-        let _ = web_sys::window()
-            .unwrap()
-            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0);
-    });
-    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -146,6 +136,16 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     // Use RefCell (not UseState) so color loading never triggers re-renders.
     // Progress display piggybacks on animation re-renders instead.
     let color_progress: Rc<RefCell<(usize, usize)>> = use_mut_ref(|| (0usize, 0usize));
+    let frame_canvas_cache: Rc<RefCell<FrameCanvasCache>> = use_mut_ref(FrameCanvasCache::default);
+    let color_cache_queue: Rc<RefCell<VecDeque<usize>>> = use_mut_ref(VecDeque::new);
+    let color_loaded_flags: Rc<RefCell<Vec<bool>>> = use_mut_ref(Vec::new);
+    let has_any_color = use_state(|| false);
+    let has_any_color_flag: Rc<RefCell<bool>> = use_mut_ref(|| false);
+    let color_cache_refresh = use_state(|| 0u64);
+    let color_cache_worker_id: Rc<RefCell<u64>> = use_mut_ref(|| 0u64);
+    let is_playing_ref = use_mut_ref(|| false);
+    let color_enabled_ref = use_mut_ref(|| false);
+    let loading_phase_ref: Rc<RefCell<LoadingPhase>> = use_mut_ref(|| LoadingPhase::Idle);
 
     let current_index = use_state(|| 0usize);
     let current_index_ref = use_mut_ref(|| 0usize);
@@ -186,6 +186,30 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
         });
     }
 
+    {
+        let is_playing_ref = is_playing_ref.clone();
+        use_effect_with(*is_playing, move |playing| {
+            *is_playing_ref.borrow_mut() = *playing;
+            || ()
+        });
+    }
+
+    {
+        let color_enabled_ref = color_enabled_ref.clone();
+        use_effect_with(*color_enabled, move |enabled| {
+            *color_enabled_ref.borrow_mut() = *enabled;
+            || ()
+        });
+    }
+
+    {
+        let loading_phase_ref = loading_phase_ref.clone();
+        use_effect_with(*loading_phase, move |phase| {
+            *loading_phase_ref.borrow_mut() = *phase;
+            || ()
+        });
+    }
+
     // Load frames when directory_path changes
     // Two-phase loading:
     // Phase 1: Load text frames quickly for immediate playback
@@ -202,6 +226,17 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
         let is_playing = is_playing.clone();
         let current_fps = current_fps.clone();
         let audio_src = audio_src.clone();
+        let frame_canvas_cache = frame_canvas_cache.clone();
+        let color_cache_queue = color_cache_queue.clone();
+        let color_loaded_flags = color_loaded_flags.clone();
+        let has_any_color = has_any_color.clone();
+        let has_any_color_flag = has_any_color_flag.clone();
+        let color_cache_refresh_for_color = color_cache_refresh.clone();
+        let current_index_ref_for_color = current_index_ref.clone();
+        let color_enabled_for_color = color_enabled.clone();
+        let color_cache_worker_id = color_cache_worker_id.clone();
+        let is_playing_ref = is_playing_ref.clone();
+        let color_enabled_ref = color_enabled_ref.clone();
 
         use_effect_with(directory_path.clone(), move |_| {
             // Reset state
@@ -210,6 +245,13 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
             loading_phase.set(LoadingPhase::Idle);
             loading_error.set(None);
             *color_progress.borrow_mut() = (0, 0);
+            frame_canvas_cache.borrow_mut().clear();
+            color_cache_queue.borrow_mut().clear();
+            color_loaded_flags.borrow_mut().clear();
+            has_any_color.set(false);
+            *has_any_color_flag.borrow_mut() = false;
+            let next_worker_id = color_cache_worker_id.borrow().wrapping_add(1);
+            *color_cache_worker_id.borrow_mut() = next_worker_id;
             current_index.set(0);
             is_playing.set(false);
             audio_src.set(None);
@@ -247,8 +289,10 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                     Ok((loaded_frames, frame_files)) => {
                         let total = loaded_frames.len();
                         *frames_ref.borrow_mut() = loaded_frames;
+                        *color_loaded_flags.borrow_mut() = vec![false; total];
                         frame_count.set(total);
                         *color_progress.borrow_mut() = (0, total);
+                        frame_canvas_cache.borrow_mut().resize(total);
                         loading_phase.set(LoadingPhase::LoadingColors);
 
                         let frames_for_color = frames_ref.clone();
@@ -262,10 +306,37 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                                     if i < frames.len() {
                                         frames[i].cframe = Some(cframe);
                                     }
+                                    {
+                                        let mut loaded_flags = color_loaded_flags.borrow_mut();
+                                        if i < loaded_flags.len() {
+                                            loaded_flags[i] = true;
+                                        }
+                                    }
+                                    color_cache_queue.borrow_mut().push_back(i);
+                                    if !*has_any_color_flag.borrow() {
+                                        *has_any_color_flag.borrow_mut() = true;
+                                        has_any_color.set(true);
+                                    }
+                                    if *color_enabled_for_color
+                                        && i == *current_index_ref_for_color.borrow()
+                                    {
+                                        color_cache_refresh_for_color
+                                            .set((*color_cache_refresh_for_color).wrapping_add(1));
+                                    }
                                 }
                                 *progress_for_color.borrow_mut() = (i + 1, total);
                             },
-                            wasm_yield,
+                            || {
+                                let is_playing_ref = is_playing_ref.clone();
+                                let color_enabled_ref = color_enabled_ref.clone();
+                                async move {
+                                    if *is_playing_ref.borrow() && !*color_enabled_ref.borrow() {
+                                        sleep_ms(BW_PLAYBACK_BACKGROUND_SLEEP_MS).await;
+                                    } else {
+                                        yield_to_event_loop().await;
+                                    }
+                                }
+                            },
                         )
                         .await;
                         loading_phase.set(LoadingPhase::Complete);
@@ -444,59 +515,160 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
         );
     }
 
-    // Update frame content: canvas for colored mode, text for plain mode
+    // Keep the color cache warm in background without hurting B/W playback.
+    {
+        let frames_ref = frames_ref.clone();
+        let frame_canvas_cache = frame_canvas_cache.clone();
+        let color_cache_queue = color_cache_queue.clone();
+        let color_loaded_flags = color_loaded_flags.clone();
+        let color_cache_refresh = color_cache_refresh.clone();
+        let color_cache_worker_id = color_cache_worker_id.clone();
+        let current_index_ref = current_index_ref.clone();
+        let is_playing_ref = is_playing_ref.clone();
+        let color_enabled_ref = color_enabled_ref.clone();
+        let loading_phase_ref = loading_phase_ref.clone();
+        let total_frames = *frame_count;
+        let has_any_color_val = *has_any_color;
+        let font_size = *calculated_font_size;
+        let font_size_key = (font_size * 100.0) as i32;
+
+        use_effect_with((total_frames, has_any_color_val, font_size_key), move |_| {
+            if total_frames == 0 || !has_any_color_val {
+                return;
+            }
+
+            let next_worker_id = color_cache_worker_id.borrow().wrapping_add(1);
+            *color_cache_worker_id.borrow_mut() = next_worker_id;
+
+            {
+                let mut cache = frame_canvas_cache.borrow_mut();
+                cache.resize(total_frames);
+                cache.invalidate_for_font_size_key(font_size_key);
+            }
+
+            {
+                let loaded_flags = color_loaded_flags.borrow();
+                let mut queue = color_cache_queue.borrow_mut();
+                queue.clear();
+                for (idx, loaded) in loaded_flags.iter().enumerate() {
+                    if *loaded {
+                        queue.push_back(idx);
+                    }
+                }
+            }
+
+            let frames_for_cache = frames_ref.clone();
+            let cache_for_cache = frame_canvas_cache.clone();
+            let queue_for_cache = color_cache_queue.clone();
+            let refresh_for_cache = color_cache_refresh.clone();
+            let worker_id_ref = color_cache_worker_id.clone();
+            let current_index_ref = current_index_ref.clone();
+            let is_playing_ref = is_playing_ref.clone();
+            let color_enabled_ref = color_enabled_ref.clone();
+            let loading_phase_ref = loading_phase_ref.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                loop {
+                    if *worker_id_ref.borrow() != next_worker_id {
+                        return;
+                    }
+
+                    if *is_playing_ref.borrow() && !*color_enabled_ref.borrow() {
+                        sleep_ms(BW_PLAYBACK_BACKGROUND_SLEEP_MS).await;
+                        continue;
+                    }
+
+                    let next_frame = { queue_for_cache.borrow_mut().pop_front() };
+                    let Some(i) = next_frame else {
+                        if *loading_phase_ref.borrow() == LoadingPhase::Complete {
+                            refresh_for_cache.set((*refresh_for_cache).wrapping_add(1));
+                            return;
+                        }
+                        sleep_ms(BW_PLAYBACK_BACKGROUND_SLEEP_MS).await;
+                        continue;
+                    };
+
+                    if cache_for_cache.borrow().has(i) {
+                        continue;
+                    }
+
+                    let offscreen = {
+                        let frames = frames_for_cache.borrow();
+                        frames
+                            .get(i)
+                            .and_then(|f| f.cframe.as_ref())
+                            .and_then(|cframe| {
+                                render_to_offscreen_canvas(cframe, &RenderConfig::new(font_size))
+                                    .ok()
+                            })
+                    };
+
+                    if let Some(canvas) = offscreen {
+                        cache_for_cache.borrow_mut().store(i, canvas);
+                        if i == *current_index_ref.borrow() {
+                            refresh_for_cache.set((*refresh_for_cache).wrapping_add(1));
+                        }
+                    }
+
+                    yield_to_event_loop().await;
+                }
+            });
+        });
+    }
+
+    // Update frame content: draw pre-rendered color canvas when available,
+    // otherwise fall back to plain text to keep playback smooth.
     {
         let content_ref = content_ref.clone();
         let canvas_ref = canvas_ref.clone();
         let frames_ref = frames_ref.clone();
+        let frame_canvas_cache = frame_canvas_cache.clone();
         let color_enabled = *color_enabled;
         let total_frames = *frame_count;
         let current_frame_idx = (*current_index).min(total_frames.saturating_sub(1));
         let font_size = *calculated_font_size;
+        let font_size_key = (*calculated_font_size * 100.0) as i32;
+        let cache_refresh_tick = *color_cache_refresh;
 
-        use_effect_with((current_frame_idx, color_enabled, total_frames, (font_size * 100.0) as i32), move |_| {
+        use_effect_with((current_frame_idx, color_enabled, total_frames, font_size_key, cache_refresh_tick), move |_| {
             let frames = frames_ref.borrow();
             if let Some(frame) = frames.get(current_frame_idx) {
                 if color_enabled {
-                    if let Some(ref cframe) = frame.cframe {
-                        // Use cascii-core-view render function
+                    if let Some(cframe) = frame.cframe.as_ref() {
                         if let Some(canvas) = canvas_ref.cast::<web_sys::HtmlCanvasElement>() {
-                            let config = RenderConfig::new(font_size);
-                            let result = render_cframe(cframe, &config);
+                            {
+                                let mut cache = frame_canvas_cache.borrow_mut();
+                                cache.resize(total_frames);
+                                cache.invalidate_for_font_size_key(font_size_key);
+                            }
 
-                            // Set canvas dimensions
-                            canvas.set_width(result.width.ceil() as u32);
-                            canvas.set_height(result.height.ceil() as u32);
+                            let drawn = {
+                                let cache = frame_canvas_cache.borrow();
+                                draw_frame_from_cache(&canvas, &cache, current_frame_idx)
+                                    .unwrap_or(false)
+                            };
+                            if drawn {
+                                return;
+                            }
 
-                            if let Ok(Some(ctx_obj)) = canvas.get_context("2d") {
-                                if let Ok(ctx) = ctx_obj.dyn_into::<web_sys::CanvasRenderingContext2d>() {
-                                    ctx.clear_rect(0.0, 0.0, result.width, result.height);
-                                    let font_str = format!("{:.2}px monospace", font_size);
-                                    ctx.set_font(&font_str);
-                                    ctx.set_text_baseline("top");
-
-                                    // Draw all batches from render result
-                                    for batch in &result.batches {
-                                        ctx.set_fill_style_str(&batch.color_string());
-                                        let _ = ctx.fill_text(&batch.text, batch.x, batch.y);
-                                    }
+                            if let Ok(offscreen) =
+                                render_to_offscreen_canvas(cframe, &RenderConfig::new(font_size))
+                            {
+                                let draw_ok = draw_cached_canvas(&canvas, &offscreen).is_ok();
+                                frame_canvas_cache
+                                    .borrow_mut()
+                                    .store(current_frame_idx, offscreen);
+                                if draw_ok {
+                                    return;
                                 }
                             }
                         }
-                    } else {
-                        // No cframe data, fall back to plain text
-                        if let Some(element) = content_ref.cast::<web_sys::HtmlElement>() {
-                            element.set_text_content(Some(&frame.content));
-                        }
-                    }
-                } else {
-                    // Plain text mode
-                    if let Some(element) = content_ref.cast::<web_sys::HtmlElement>() {
-                        element.set_text_content(Some(&frame.content));
                     }
                 }
+
+                if let Some(element) = content_ref.cast::<web_sys::HtmlElement>() {
+                    element.set_text_content(Some(&frame.content));
+                }
             }
-            || ()
         });
     }
 
@@ -634,6 +806,7 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     } else {
         None
     };
+    let colors_loading = *loading_phase == LoadingPhase::LoadingColors;
 
     let font_size_style = {
         let font_size = *calculated_font_size;
@@ -652,38 +825,10 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
         }
     };
 
-    // SVG icons (Lucide-style)
-    let play_svg = Html::from_html_unchecked(AttrValue::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"></polygon></svg>"#
-    ));
-    let pause_svg = Html::from_html_unchecked(AttrValue::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="14" y="4" width="4" height="16" rx="1"></rect><rect x="6" y="4" width="4" height="16" rx="1"></rect></svg>"#
-    ));
-    let skip_forward_svg = Html::from_html_unchecked(AttrValue::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19"></line></svg>"#
-    ));
-    let skip_backward_svg = Html::from_html_unchecked(AttrValue::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"></polygon><line x1="5" y1="19" x2="5" y2="5"></line></svg>"#
-    ));
-
-    let color_svg = Html::from_html_unchecked(AttrValue::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08"></path><path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02z"></path></svg>"#
-    ));
-    let volume_svg = Html::from_html_unchecked(AttrValue::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"></path><path d="M16 9a5 5 0 0 1 0 6"></path><path d="M19.364 18.364a9 9 0 0 0 0-12.728"></path></svg>"#
-    ));
-    let mute_svg = Html::from_html_unchecked(AttrValue::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"></path><line x1="22" x2="16" y1="9" y2="15"></line><line x1="16" x2="22" y1="9" y2="15"></line></svg>"#
-    ));
-    let circle_x_svg = Html::from_html_unchecked(AttrValue::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="m15 9-6 6"></path><path d="m9 9 6 6"></path></svg>"#
-    ));
-    let eye_svg = Html::from_html_unchecked(AttrValue::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"></path><circle cx="12" cy="12" r="3"></circle></svg>"#
-    ));
-    let eye_off_svg = Html::from_html_unchecked(AttrValue::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"></path><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"></path><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"></path><path d="m2 2 20 20"></path></svg>"#
-    ));
+    // Lucide icon IDs
+    let play_icon = if *is_playing { IconId::LucidePause } else { IconId::LucidePlay };
+    let mute_icon_id = if *audio_muted { IconId::LucideVolumeX } else { IconId::LucideVolume2 };
+    let overlay_icon_id = if *overlay_hidden { IconId::LucideEyeOff } else { IconId::LucideEye };
 
     let on_toggle_color = {
         let color_enabled = color_enabled.clone();
@@ -720,27 +865,22 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
         })
     };
 
-    let play_pause_icon = if *is_playing { pause_svg } else { play_svg };
-
-    // Check if any loaded frame has color data
-    let color_available = {
-        let frames = frames_ref.borrow();
-        total_frames > 0 && frames.iter().any(|f| f.has_color())
-    };
+    let color_available = *has_any_color;
 
     let has_colors = {
-        let frames = frames_ref.borrow();
-        *color_enabled && color_available
-            && frames
+        if !*color_enabled || !color_available {
+            false
+        } else {
+            let frames = frames_ref.borrow();
+            frames
                 .get(current_frame)
                 .map(|f| f.has_color())
                 .unwrap_or(false)
+        }
     };
 
     let audio_data_url = (*audio_src).clone().unwrap_or_default();
     let has_audio = audio_src.is_some();
-    let mute_icon = if *audio_muted { mute_svg } else { volume_svg };
-    let overlay_icon = if *overlay_hidden { eye_off_svg } else { eye_svg };
 
     let viewer_class = if *overlay_hidden { "ascii-frames-viewer fullscreen-mode" } else { "ascii-frames-viewer" };
     let show_controls = !*overlay_hidden || *is_hovering;
@@ -782,7 +922,7 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                     if total_frames > 1 {
                         <div class="control-row">
                             <input id="progress-slider" class="progress" type="range" min="0" max="1" step="0.001" value={progress.to_string()} oninput={on_seek} disabled={total_frames == 0} />
-                            <button id="play-pause-btn" class="ctrl-btn play-btn" type="button" onclick={on_toggle_play} disabled={total_frames == 0} title={if *is_playing { "Pause" } else { "Play" }}>{play_pause_icon}</button>
+                            <button id="play-pause-btn" class="ctrl-btn play-btn" type="button" onclick={on_toggle_play} disabled={total_frames == 0} title={if *is_playing { "Pause" } else { "Play" }}><Icon icon_id={play_icon} width={"20"} height={"20"} /></button>
                         </div>
                     }
 
@@ -790,7 +930,7 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                     if total_frames > 1 {
                         <div class="control-row">
                             <input id="volume-slider" class="progress" type="range" min="0" max="1" step="0.01" value={audio_volume.to_string()} oninput={on_volume_change} />
-                            <button id="mute-btn" class={if *audio_muted { "ctrl-btn mute-btn muted" } else { "ctrl-btn mute-btn" }} type="button" onclick={on_toggle_mute} title={if *audio_muted { "Unmute" } else { "Mute" }}>{mute_icon}</button>
+                            <button id="mute-btn" class={if *audio_muted { "ctrl-btn mute-btn muted" } else { "ctrl-btn mute-btn" }} type="button" onclick={on_toggle_mute} title={if *audio_muted { "Unmute" } else { "Mute" }}><Icon icon_id={mute_icon_id} width={"20"} height={"20"} /></button>
                         </div>
                     }
 
@@ -800,13 +940,13 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                             <label>{"FPS:"}</label>
                             <input id="fps-input" type="number" class="fps-input" value={current_fps.to_string()} min="1" oninput={on_fps_change} />
                         }
-                        <button id="color-btn" class={if *color_enabled && color_available { "ctrl-btn color-btn active" } else if !color_available { "ctrl-btn color-btn disabled" } else { "ctrl-btn color-btn" }} type="button" onclick={on_toggle_color} disabled={!color_available} title={if !color_available { "No color data available" } else if *color_enabled { "Color enabled" } else { "Color disabled" }}>{color_svg}</button>
-                        <button id="hide-overlay-btn" class={if *overlay_hidden { "ctrl-btn active" } else { "ctrl-btn" }} type="button" onclick={on_toggle_overlay} title={if *overlay_hidden { "Show overlay" } else { "Hide overlay" }}>{overlay_icon}</button>
-                        <button id="clear-btn" class="ctrl-btn" type="button" onclick={on_clear_click} title="Clear">{circle_x_svg}</button>
+                        <button id="color-btn" class={if *color_enabled && color_available { "ctrl-btn color-btn active" } else if !color_available { "ctrl-btn color-btn disabled" } else { "ctrl-btn color-btn" }} type="button" onclick={on_toggle_color} disabled={!color_available} title={if colors_loading { "Loading colors..." } else if !color_available { "No color data available" } else if *color_enabled { "Color enabled" } else { "Color disabled" }}><Icon icon_id={IconId::LucideBrush} width={"16"} height={"16"} /></button>
+                        <button id="hide-overlay-btn" class={if *overlay_hidden { "ctrl-btn active" } else { "ctrl-btn" }} type="button" onclick={on_toggle_overlay} title={if *overlay_hidden { "Show overlay" } else { "Hide overlay" }}><Icon icon_id={overlay_icon_id} width={"20"} height={"20"} /></button>
+                        <button id="clear-btn" class="ctrl-btn" type="button" onclick={on_clear_click} title="Clear"><Icon icon_id={IconId::LucideXCircle} width={"20"} height={"20"} /></button>
                         if total_frames > 1 {
                             <div style="flex: 1;"></div>
-                            <button id="step-backward-btn" class="ctrl-btn" type="button" onclick={on_step_backward} disabled={total_frames == 0} title="Step backward">{skip_backward_svg}</button>
-                            <button id="step-forward-btn" class="ctrl-btn" type="button" onclick={on_step_forward} disabled={total_frames == 0} title="Step forward">{skip_forward_svg}</button>
+                            <button id="step-backward-btn" class="ctrl-btn" type="button" onclick={on_step_backward} disabled={total_frames == 0} title="Step backward"><span style="display: inline-flex; transform: scaleX(-1);"><Icon icon_id={IconId::LucideSkipForward} width={"20"} height={"20"} /></span></button>
+                            <button id="step-forward-btn" class="ctrl-btn" type="button" onclick={on_step_forward} disabled={total_frames == 0} title="Step forward"><Icon icon_id={IconId::LucideSkipForward} width={"20"} height={"20"} /></button>
                         }
                     </div>
                 </div>

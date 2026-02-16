@@ -138,11 +138,10 @@ fn read_colors_file(txt_file_path: String) -> Result<Option<ColorData>, String> 
     Ok(Some(ColorData { width, height, rgb }))
 }
 
-/// Given a .txt frame file path, look for a matching .cframe file and return raw bytes as base64.
-/// Parsing happens on the WASM side to avoid expensive element-by-element JSON array
-/// deserialization of Vec<u8> fields across the JS-WASM boundary.
+/// Given a .txt frame file path, look for a matching .cframe file and return raw bytes.
+/// Parsing happens on the WASM side via cascii-core-view.
 #[tauri::command]
-fn read_cframe_file(txt_file_path: String) -> Result<Option<String>, String> {
+fn read_cframe_file(txt_file_path: String) -> Result<Option<Vec<u8>>, String> {
     let txt_path = PathBuf::from(&txt_file_path);
     let cframe_path = txt_path.with_extension("cframe");
 
@@ -153,8 +152,7 @@ fn read_cframe_file(txt_file_path: String) -> Result<Option<String>, String> {
     let data =
         fs::read(&cframe_path).map_err(|e| format!("Failed to read cframe file: {}", e))?;
 
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    Ok(Some(STANDARD.encode(&data)))
+    Ok(Some(data))
 }
 
 #[tauri::command]
