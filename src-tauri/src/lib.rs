@@ -167,6 +167,8 @@ pub struct ProjectDetails {
     pub fps: Option<u32>,
     pub has_audio: bool,
     pub audio_path: Option<String>,
+    pub background_color: Option<String>,
+    pub color: Option<String>,
 }
 
 /// Read audio file and return as base64 for data URL
@@ -186,7 +188,7 @@ fn read_audio_file(audio_path: String) -> Result<String, String> {
     Ok(format!("data:audio/mpeg;base64,{}", b64))
 }
 
-/// Read details.md from the directory and parse project metadata
+/// Read project metadata from details.toml (or fallback to details.md)
 #[tauri::command]
 fn read_project_details(directory_path: String) -> Result<ProjectDetails, String> {
     let dir = PathBuf::from(&directory_path);
@@ -198,10 +200,7 @@ fn read_project_details(directory_path: String) -> Result<ProjectDetails, String
         dir
     };
 
-    let details_path = dir.join("details.md");
     let audio_path = dir.join("audio.mp3");
-
-    let mut fps: Option<u32> = None;
     let has_audio = audio_path.exists();
     let audio_path_str = if has_audio {
         Some(audio_path.to_string_lossy().to_string())
@@ -209,9 +208,24 @@ fn read_project_details(directory_path: String) -> Result<ProjectDetails, String
         None
     };
 
-    // Parse details.md if it exists
-    if details_path.exists() {
-        if let Ok(content) = fs::read_to_string(&details_path) {
+    let mut fps: Option<u32> = None;
+    let mut background_color: Option<String> = None;
+    let mut color: Option<String> = None;
+
+    // Try details.toml first, fall back to details.md
+    let toml_path = dir.join("details.toml");
+    let md_path = dir.join("details.md");
+
+    if toml_path.exists() {
+        if let Ok(content) = fs::read_to_string(&toml_path) {
+            if let Ok(details) = cascii_core_view::ProjectDetails::from_toml_str(&content) {
+                fps = details.fps;
+                background_color = details.background_color;
+                color = details.color;
+            }
+        }
+    } else if md_path.exists() {
+        if let Ok(content) = fs::read_to_string(&md_path) {
             for line in content.lines() {
                 if let Some(value) = line.strip_prefix("FPS:") {
                     fps = value.trim().parse::<u32>().ok();
@@ -224,6 +238,8 @@ fn read_project_details(directory_path: String) -> Result<ProjectDetails, String
         fps,
         has_audio,
         audio_path: audio_path_str,
+        background_color,
+        color,
     })
 }
 

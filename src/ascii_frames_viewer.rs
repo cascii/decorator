@@ -13,7 +13,7 @@ use yew_icons::{Icon, IconId};
 use cascii_core_view::{
     draw_cached_canvas, draw_frame_from_cache, load_color_frames, load_text_frames,
     render_to_offscreen_canvas, yield_to_event_loop, FontSizing, Frame, FrameCanvasCache,
-    FrameDataProvider, FrameFile, LoadResult, LoadingPhase, RenderConfig,
+    FrameColors, FrameDataProvider, FrameFile, LoadResult, LoadingPhase, RenderConfig,
 };
 
 #[wasm_bindgen(inline_js = r#"
@@ -111,6 +111,8 @@ struct ProjectDetails {
     fps: Option<u32>,
     has_audio: bool,
     audio_path: Option<String>,
+    background_color: Option<String>,
+    color: Option<String>,
 }
 
 #[derive(Properties, PartialEq, Clone)]
@@ -144,7 +146,7 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     let color_cache_refresh = use_state(|| 0u64);
     let color_cache_worker_id: Rc<RefCell<u64>> = use_mut_ref(|| 0u64);
     let is_playing_ref = use_mut_ref(|| false);
-    let color_enabled_ref = use_mut_ref(|| false);
+    let color_mode_ref: Rc<RefCell<u8>> = use_mut_ref(|| 0u8);
     let loading_phase_ref: Rc<RefCell<LoadingPhase>> = use_mut_ref(|| LoadingPhase::Idle);
 
     let current_index = use_state(|| 0usize);
@@ -152,8 +154,13 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     let is_playing = use_state(|| false);
     let interval_handle: Rc<RefCell<Option<Interval>>> = use_mut_ref(|| None);
 
-    // Color display toggle
-    let color_enabled = use_state(|| false);
+    // Color display mode: 0 = B&W, 1 = details.toml colors, 2 = colored frames
+    let color_mode = use_state(|| 0u8);
+    // Parsed CSS color strings from details.toml
+    let details_fg_css = use_state(|| None::<String>);
+    let details_bg_css = use_state(|| None::<String>);
+    // True when details.toml has non-default colors (not white-on-black)
+    let has_custom_colors = use_state(|| false);
 
     // Auto-sizing state
     let container_ref = use_node_ref();
@@ -195,9 +202,9 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     }
 
     {
-        let color_enabled_ref = color_enabled_ref.clone();
-        use_effect_with(*color_enabled, move |enabled| {
-            *color_enabled_ref.borrow_mut() = *enabled;
+        let color_mode_ref = color_mode_ref.clone();
+        use_effect_with(*color_mode, move |mode| {
+            *color_mode_ref.borrow_mut() = *mode;
             || ()
         });
     }
@@ -233,10 +240,13 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
         let has_any_color_flag = has_any_color_flag.clone();
         let color_cache_refresh_for_color = color_cache_refresh.clone();
         let current_index_ref_for_color = current_index_ref.clone();
-        let color_enabled_for_color = color_enabled.clone();
+        let color_mode_for_color = color_mode.clone();
         let color_cache_worker_id = color_cache_worker_id.clone();
         let is_playing_ref = is_playing_ref.clone();
-        let color_enabled_ref = color_enabled_ref.clone();
+        let color_mode_ref = color_mode_ref.clone();
+        let details_fg_css = details_fg_css.clone();
+        let details_bg_css = details_bg_css.clone();
+        let has_custom_colors = has_custom_colors.clone();
 
         use_effect_with(directory_path.clone(), move |_| {
             // Reset state
@@ -281,6 +291,15 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                             audio_src.set(Some(data_url));
                         }
                     }
+                    // Parse details.toml colors for mode 1
+                    let fg = details.color.as_deref().unwrap_or("white");
+                    let bg = details.background_color.as_deref().unwrap_or("black");
+                    let colors = FrameColors::from_strings(fg, bg);
+                    // Only enable details color mode if colors differ from default
+                    let is_custom = colors.foreground != (255, 255, 255) || colors.background != (0, 0, 0);
+                    has_custom_colors.set(is_custom);
+                    details_fg_css.set(Some(colors.foreground_css()));
+                    details_bg_css.set(Some(colors.background_css()));
                 }
 
                 // Two-phase loading via cascii-core-view orchestrators
@@ -317,7 +336,7 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                                         *has_any_color_flag.borrow_mut() = true;
                                         has_any_color.set(true);
                                     }
-                                    if *color_enabled_for_color
+                                    if *color_mode_for_color == 2
                                         && i == *current_index_ref_for_color.borrow()
                                     {
                                         color_cache_refresh_for_color
@@ -328,9 +347,9 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                             },
                             || {
                                 let is_playing_ref = is_playing_ref.clone();
-                                let color_enabled_ref = color_enabled_ref.clone();
+                                let color_mode_ref = color_mode_ref.clone();
                                 async move {
-                                    if *is_playing_ref.borrow() && !*color_enabled_ref.borrow() {
+                                    if *is_playing_ref.borrow() && *color_mode_ref.borrow() != 2 {
                                         sleep_ms(BW_PLAYBACK_BACKGROUND_SLEEP_MS).await;
                                     } else {
                                         yield_to_event_loop().await;
@@ -525,7 +544,7 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
         let color_cache_worker_id = color_cache_worker_id.clone();
         let current_index_ref = current_index_ref.clone();
         let is_playing_ref = is_playing_ref.clone();
-        let color_enabled_ref = color_enabled_ref.clone();
+        let color_mode_ref = color_mode_ref.clone();
         let loading_phase_ref = loading_phase_ref.clone();
         let total_frames = *frame_count;
         let has_any_color_val = *has_any_color;
@@ -564,7 +583,7 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
             let worker_id_ref = color_cache_worker_id.clone();
             let current_index_ref = current_index_ref.clone();
             let is_playing_ref = is_playing_ref.clone();
-            let color_enabled_ref = color_enabled_ref.clone();
+            let color_mode_ref = color_mode_ref.clone();
             let loading_phase_ref = loading_phase_ref.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 loop {
@@ -572,7 +591,7 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                         return;
                     }
 
-                    if *is_playing_ref.borrow() && !*color_enabled_ref.borrow() {
+                    if *is_playing_ref.borrow() && *color_mode_ref.borrow() != 2 {
                         sleep_ms(BW_PLAYBACK_BACKGROUND_SLEEP_MS).await;
                         continue;
                     }
@@ -622,17 +641,17 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
         let canvas_ref = canvas_ref.clone();
         let frames_ref = frames_ref.clone();
         let frame_canvas_cache = frame_canvas_cache.clone();
-        let color_enabled = *color_enabled;
+        let color_mode = *color_mode;
         let total_frames = *frame_count;
         let current_frame_idx = (*current_index).min(total_frames.saturating_sub(1));
         let font_size = *calculated_font_size;
         let font_size_key = (*calculated_font_size * 100.0) as i32;
         let cache_refresh_tick = *color_cache_refresh;
 
-        use_effect_with((current_frame_idx, color_enabled, total_frames, font_size_key, cache_refresh_tick), move |_| {
+        use_effect_with((current_frame_idx, color_mode, total_frames, font_size_key, cache_refresh_tick), move |_| {
             let frames = frames_ref.borrow();
             if let Some(frame) = frames.get(current_frame_idx) {
-                if color_enabled {
+                if color_mode == 2 {
                     if let Some(cframe) = frame.cframe.as_ref() {
                         if let Some(canvas) = canvas_ref.cast::<web_sys::HtmlCanvasElement>() {
                             {
@@ -806,8 +825,6 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     } else {
         None
     };
-    let colors_loading = *loading_phase == LoadingPhase::LoadingColors;
-
     let font_size_style = {
         let font_size = *calculated_font_size;
         let sizing = FontSizing::default();
@@ -829,11 +846,27 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     let play_icon = if *is_playing { IconId::LucidePause } else { IconId::LucidePlay };
     let mute_icon_id = if *audio_muted { IconId::LucideVolumeX } else { IconId::LucideVolume2 };
     let overlay_icon_id = if *overlay_hidden { IconId::LucideEyeOff } else { IconId::LucideEye };
+    let color_icon = match *color_mode {
+        0 => IconId::LucidePencil,
+        1 => IconId::LucidePaintbrush,
+        _ => IconId::LucideBrush,
+    };
 
     let on_toggle_color = {
-        let color_enabled = color_enabled.clone();
+        let color_mode = color_mode.clone();
+        let color_available = *has_any_color;
+        let has_custom = *has_custom_colors;
         Callback::from(move |_| {
-            color_enabled.set(!*color_enabled);
+            let next = match *color_mode {
+                0 => {
+                    if has_custom { 1 }
+                    else if color_available { 2 }
+                    else { 0 }
+                }
+                1 => if color_available { 2 } else { 0 },
+                _ => 0,
+            };
+            color_mode.set(next);
         })
     };
 
@@ -868,7 +901,7 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
     let color_available = *has_any_color;
 
     let has_colors = {
-        if !*color_enabled || !color_available {
+        if *color_mode != 2 || !color_available {
             false
         } else {
             let frames = frames_ref.borrow();
@@ -890,7 +923,15 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
             if has_audio {
                 <audio ref={audio_ref} src={audio_data_url} preload="auto" style="display: none;"></audio>
             }
-            <div class="frames-display" ref={container_ref}>
+            <div class="frames-display" ref={container_ref} style={
+                if *color_mode == 1 {
+                    let bg = (*details_bg_css).clone().unwrap_or_default();
+                    let fg = (*details_fg_css).clone().unwrap_or_default();
+                    format!("background: {}; color: {};", bg, fg)
+                } else {
+                    String::new()
+                }
+            }>
                 if *loading_phase == LoadingPhase::LoadingText {
                     <div class="loading-frames">{loading_message}</div>
                 } else if let Some(ref error) = *loading_error {
@@ -901,7 +942,14 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                     if has_colors {
                         <canvas ref={canvas_ref.clone()} class="ascii-frame-canvas"></canvas>
                     } else {
-                        <pre class="ascii-frame-content" style={font_size_style.clone()} ref={content_ref.clone()}></pre>
+                        <pre class="ascii-frame-content" style={
+                            if *color_mode == 1 {
+                                let fg = (*details_fg_css).clone().unwrap_or_default();
+                                format!("{}; color: {};", font_size_style, fg)
+                            } else {
+                                font_size_style.clone()
+                            }
+                        } ref={content_ref.clone()}></pre>
                     }
                 }
             </div>
@@ -930,14 +978,12 @@ pub fn ascii_frames_viewer(props: &AsciiFramesViewerProps) -> Html {
                             <label>{"FPS:"}</label>
                             <input id="fps-input" type="number" class="fps-input" value={current_fps.to_string()} min="1" oninput={on_fps_change} />
                         }
-                        <button id="color-btn" class={if *color_enabled && color_available { "ctrl-btn color-btn active" } else if !color_available { "ctrl-btn color-btn disabled" } else { "ctrl-btn color-btn" }} type="button" onclick={on_toggle_color} disabled={!color_available} title={if colors_loading { "Loading colors..." } else if !color_available { "No color data available" } else if *color_enabled { "Color enabled" } else { "Color disabled" }}><Icon icon_id={IconId::LucideBrush} width={"16"} height={"16"} /></button>
+                        <button id="color-btn" class="ctrl-btn color-btn" type="button" onclick={on_toggle_color} title={match *color_mode { 0 => "Black & White", 1 => "Details colors", _ => "Colored frames" }}><Icon icon_id={color_icon} width={"16"} height={"16"} /></button>
                         <button id="hide-overlay-btn" class={if *overlay_hidden { "ctrl-btn active" } else { "ctrl-btn" }} type="button" onclick={on_toggle_overlay} title={if *overlay_hidden { "Show overlay" } else { "Hide overlay" }}><Icon icon_id={overlay_icon_id} width={"20"} height={"20"} /></button>
                         <button id="clear-btn" class="ctrl-btn" type="button" onclick={on_clear_click} title="Clear"><Icon icon_id={IconId::LucideXCircle} width={"20"} height={"20"} /></button>
                         <span class="info-text">{format!("{}/{}", current_frame + 1, total_frames)}</span>
                         if let Some(ref msg) = color_loading_message {
                             <span class="info-text">{msg.clone()}</span>
-                        } else if has_colors {
-                            <span class="info-text">{"Color"}</span>
                         }
                         if total_frames > 1 {
                             <div style="flex: 1;"></div>
